@@ -70,16 +70,30 @@ Order:
 6. **`.preem` package format** — currently a flat JSON file. Waveform / thumbnail / proxy caches will want to live inside the project bundle. Pre-render cache lives at `~/Library/Caches/Preem/projects/<id>/prerender/` and survives renames; not urgent.
 7. **Render-graph fusion** — multiple `effects` on a clip iterate one Metal pass each. Fusing into one pass per layer would matter as the effect arsenal grows.
 
-## Open mystery — overnight playback choppiness
+## Open mystery — overnight playback choppiness (root cause found 2026-05-28)
 
-User reported that after leaving Preem open overnight, actual playback (not just the chip) got choppy. The chip false-positive was diagnosed and fixed (nil drawables + cap + hysteresis), but the real choppiness root cause is **not found**. Code reading didn't turn it up:
-- `OfflineSequenceCompositor.frameSources` / `lastSourceTime` caches are bounded (one entry per source clip).
-- `AVAssetFrameSource.seek` tears down the previous reader cleanly.
-- Compose path doesn't allocate per-frame outside the bounded scratch pool.
+User reported that after leaving Preem open overnight, actual playback (not just the chip) got choppy. The 2026-05-28 audit found three per-tick costs paid on the main actor every display-link frame, which compound over a long session. All three are now fixed:
 
-If the user reports it again, add telemetry to the realtime tick first: rolling p50/p99 of ms-per-tick, `CVPixelBufferPool` allocate failures, and the `frameSources` dictionary size. The most likely real causes (no evidence yet):
-- macOS swapping the working set after extended idle (first wake = slow).
-- A `@Published` storm somewhere else that's flooding SwiftUI re-renders.
+1. **Per-frame disk scan (prime suspect).** The realtime tick called `cacheSegmentAtPlayhead()` → `PreRenderCache.allSegments`, doing a synchronous `FileManager.contentsOfDirectory` + string parse + array alloc every frame. Now `WorkspaceModel` mirrors the segment list in memory (`renderSegments()` / `refreshRenderSegmentCache()`) and refreshes only on mutation (render complete, cache clear, sequence switch). `PreRenderCache.segmentContaining` was removed.
+2. **`@Published` publish storm.** `playheadTime` / `sourceTimeSeconds` were written unconditionally every tick, firing `objectWillChange` on the whole model even when the value was unchanged. Now guarded on value change.
+3. **O(tracks·clips) per-frame recompute.** `activeVideoTransition` re-sorted every track's clips and scanned all pairs on each access — and was only consumed by the dead dual-PPE host. Deleted along with that host.
+
+Also fixed a slow memory climb: `OfflineSequenceCompositor` now evicts `frameSources` / `lastDeliveredFrame` / `lastSourceTime` for clips no longer in the sequence (`pruneUnusedSources()`, gated on clip-count change so steady-state playback stays allocation-free). Previously it retained a decoder + held `CVPixelBuffer` per source ever placed.
+
+If it still reproduces, add telemetry to the realtime tick: rolling p50/p99 of ms-per-tick, `CVPixelBufferPool` allocate failures, and `frameSources.count`. Remaining candidate not yet ruled out: macOS swapping the working set after extended idle (first wake = slow).
+
+## 2026-05-28 audit follow-through
+
+A full cleanliness/perf audit ran after the M3 keyframe push. Beyond the choppiness fixes above:
+- **⌘Q quit-on-save** for an untitled project now waits for the async `NSSavePanel` via `save(completion:)` instead of polling `isDirty` next-runloop (which always read still-dirty and aborted the quit).
+- **Effect Controls** reads `currentTransform` from `leadClipID` (the video lead) so the sliders and keyframe strip can't describe different clips when a V+A pair is selected (`Set.first` was nondeterministic).
+- **Drag batching:** slider drags and on-canvas direct manipulation use light setters (`setTransformParameterOnSelectionLight` / `setClipTransformLight`) bracketed by `beginUndoBatch` + `commitTransformEdits`, so a drag no longer floods the undo stack + pre-render cache per tick (mirrors the keyframe-diamond drag).
+- **Keyframes:** round (not truncate) ms quantization; per-sample re-sort skipped when already sorted; `moveKeyframe` dedups same-time collisions; inverted `easeIn`/`easeOut` doc comments fixed (the sampling math was already correct).
+- **Realtime gate** (`inFlight`) releases in a `defer` so a thrown compose can't freeze the viewer permanently.
+- **Dead code removed:** the dual-PPE `PPEProgramHost` + Coordinator in `ProgramViewer`, the `VideoFileBridge` actor, `ActiveTransition` / `playbackShiftForPairedFadeIn` / `underlyingVideoClipAndSource`, and dead `paramRow` / `trackName` helpers. `PPEHostView` stays — still used by the Source viewer.
+- **Project is now a git repo** (`main` + the audit work). `themarket.mp4` is gitignored (large test footage).
+
+Media is streamed, not RAM-resident: each source clip is decoded on demand through an `AVAssetFrameSource` (AVAssetReader + VideoToolbox); seek = tear down + rebuild the reader at the new time. The only live-path caching is one warm decoder + one held frame per source.
 
 ## Known gotchas / footguns
 
