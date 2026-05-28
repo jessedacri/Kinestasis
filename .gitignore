@@ -1,0 +1,7 @@
+.build/
+.DS_Store
+*.xcuserstate
+.swiftpm/
+
+# Large test footage
+themarket.mp4

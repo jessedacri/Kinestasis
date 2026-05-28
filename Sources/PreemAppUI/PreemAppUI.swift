@@ -1,0 +1,592 @@
+import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
+import PreemCore
+import PreemMedia
+import PreemRender
+import PreemEffects
+import PreemML
+import PreemTimelineUI
+
+public extension Notification.Name {
+    static let preemExportFCPXML = Notification.Name("preem.export.fcpxml")
+    static let preemNewSequence  = Notification.Name("preem.sequence.new")
+    static let preemNewProject   = Notification.Name("preem.project.new")
+    static let preemOpenProject  = Notification.Name("preem.project.open")
+    static let preemSave         = Notification.Name("preem.project.save")
+    static let preemSaveAs       = Notification.Name("preem.project.saveAs")
+    static let preemAddVideoTrack = Notification.Name("preem.track.addVideo")
+    static let preemAddAudioTrack = Notification.Name("preem.track.addAudio")
+    static let preemRenderInToOut = Notification.Name("preem.render.inToOut")
+    static let preemExportSequence = Notification.Name("preem.export.sequence")
+    static let preemShowEffectControls = Notification.Name("preem.effects.show")
+}
+
+public struct PreemRootView: View {
+    @StateObject private var workspace = WorkspaceModel()
+    @State private var keyMonitor: Any?
+
+    public init() {}
+
+    public var body: some View {
+        content
+            .navigationTitle("\(workspace.project.name)\(workspace.isDirty ? " — edited" : "")")
+            // Video editors expect a dark UI all the time, regardless
+            // of the system appearance. Forcing dark keeps the bin +
+            // toolbar from washing out against the dark timeline.
+            .preferredColorScheme(.dark)
+    }
+
+    private var content: some View {
+        PreemSplitView(
+            isVertical: true,                                    // vertical divider → horizontal stack
+            autosaveName: "preem.root.binVsMain",
+            firstSpec: PreemPaneSpec(minThickness: 180, maxThickness: 360, holdingPriority: 260),
+            secondSpec: PreemPaneSpec(minThickness: 600, holdingPriority: 240),
+            initialFirstThickness: 240,
+            first: {
+                BinBrowserView(workspace: workspace)
+                    .focusBorder(workspace.focusedViewer == .bin)
+            },
+            second: {
+                PreemSplitView(
+                    isVertical: false,                            // horizontal divider → vertical stack
+                    autosaveName: "preem.root.viewersVsTimeline",
+                    firstSpec: PreemPaneSpec(minThickness: 200, maxThickness: 480, holdingPriority: 260),
+                    secondSpec: PreemPaneSpec(minThickness: 240, holdingPriority: 240),
+                    initialFirstThickness: 320,
+                    first: {
+                        PreemSplitView(
+                            isVertical: true,                     // source | program
+                            autosaveName: "preem.viewers.sourceVsProgram",
+                            firstSpec: PreemPaneSpec(minThickness: 240, holdingPriority: 250),
+                            secondSpec: PreemPaneSpec(minThickness: 240, holdingPriority: 250),
+                            initialFirstThickness: 520,
+                            first: {
+                                ViewerPane(title: "Source", clip: workspace.sourceClip, workspace: workspace)
+                                    .focusBorder(workspace.focusedViewer == .source)
+                            },
+                            second: {
+                                ProgramViewer(workspace: workspace)
+                                    .focusBorder(workspace.focusedViewer == .program)
+                            }
+                        )
+                    },
+                    second: {
+                        TimelineWithZoomBar(workspace: workspace)
+                            .focusBorder(workspace.focusedViewer == .timeline)
+                    }
+                )
+            }
+        )
+        .frame(minWidth: 1200, minHeight: 800)
+        .onReceive(NotificationCenter.default.publisher(for: .preemExportFCPXML)) { _ in
+            exportFCPXML()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemNewSequence)) { _ in
+            workspace.showingNewSequenceSheet = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemNewProject)) { _ in
+            workspace.newProject()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemOpenProject)) { _ in
+            workspace.openProject()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemSave)) { _ in
+            workspace.save()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemSaveAs)) { _ in
+            workspace.saveAs()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemAddVideoTrack)) { _ in
+            workspace.addVideoTrack()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemAddAudioTrack)) { _ in
+            workspace.addAudioTrack()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemRenderInToOut)) { _ in
+            workspace.renderInToOut()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemExportSequence)) { _ in
+            workspace.showingExportSheet = true
+        }
+        .sheet(isPresented: $workspace.showingExportSheet) {
+            ExportSheet(workspace: workspace)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemShowEffectControls)) { _ in
+            // ⇧⌘5 — flip the Source pane to the Effect Controls tab
+            // (Premiere-style, no popover).
+            workspace.sourcePaneTab = .effectControls
+            workspace.focusedViewer = .source
+        }
+        .sheet(isPresented: $workspace.showingNewSequenceSheet) {
+            SequenceSettingsSheet(
+                mode: .createNew,
+                initialName: "Timeline \(workspace.project.sequences.count + 1)",
+                initialSettings: SequencePreset.hd1080_23_976.settings ?? SequenceSettings(frameRate: .twentyThree976, resolution: PixelSize(width: 1920, height: 1080)),
+                onConfirm: { name, settings in
+                    workspace.createSequence(name: name, settings: settings)
+                    workspace.showingNewSequenceSheet = false
+                },
+                onCancel: { workspace.showingNewSequenceSheet = false }
+            )
+        }
+        .sheet(item: $workspace.pendingMismatch) { pending in
+            SequenceMismatchSheet(
+                pending: pending,
+                onMatch:  { workspace.resolveMismatchMatchSequence() },
+                onKeep:   { workspace.resolveMismatchKeepSequence() },
+                onCancel: { workspace.resolveMismatchCancel() }
+            )
+        }
+        .onAppear { installKeyMonitor() }
+        .onDisappear { removeKeyMonitor() }
+    }
+
+    private func installKeyMonitor() {
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Skip if user is typing in a text field
+            if NSApp.keyWindow?.firstResponder is NSText { return event }
+
+            guard let chars = event.charactersIgnoringModifiers else { return event }
+            let isShift = event.modifierFlags.contains(.shift)
+            let isCommand = event.modifierFlags.contains(.command)
+            let isOption = event.modifierFlags.contains(.option)
+
+            // Command-modified shortcuts take precedence over bare keys.
+            if isCommand {
+                switch chars {
+                case "k":
+                    workspace.splitAtPlayhead()
+                    return nil
+                case "l":
+                    workspace.toggleLinkOnSelection()
+                    return nil
+                case "d":
+                    if isShift {
+                        workspace.removeTransitionAtPlayhead()
+                    } else {
+                        workspace.addCrossDissolveAtPlayhead()
+                    }
+                    return nil
+                case "=", "+":
+                    workspace.zoomIn()
+                    return nil
+                case "-":
+                    workspace.zoomOut()
+                    return nil
+                case "z":
+                    if isShift { workspace.redo() } else { workspace.undo() }
+                    return nil
+                default:
+                    return event
+                }
+            }
+
+            switch chars {
+            case " ":
+                workspace.toggleFocusedPlay()
+                return nil
+            case "n", "N":
+                PreemSettings.shared.snappingEnabled.toggle()
+                return nil
+            case "v", "V":
+                workspace.splitAtPlayhead()
+                return nil
+            case "b", "B":
+                workspace.activeTool = .blade
+                return nil
+            case "a", "A":
+                workspace.activeTool = .pointer
+                return nil
+            case "j":
+                workspace.focusedPlayReverse()
+                return nil
+            case "k":
+                workspace.focusedStop()
+                return nil
+            case "l":
+                workspace.focusedPlayForward()
+                return nil
+            case String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!)):
+                workspace.focusedJumpFrames(isShift ? -10 : -1)
+                return nil
+            case String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)):
+                workspace.focusedJumpFrames(isShift ? 10 : 1)
+                return nil
+            case String(Character(UnicodeScalar(NSHomeFunctionKey)!)):
+                workspace.jumpToStart()
+                return nil
+            case String(Character(UnicodeScalar(NSEndFunctionKey)!)):
+                workspace.jumpToEnd()
+                return nil
+            case "i":
+                let sourceFocused = workspace.focusedViewer == .source && workspace.sourceClip != nil
+                if isOption {
+                    if sourceFocused { workspace.sourceInMark = nil }
+                    else { workspace.clearProgramIn() }
+                } else if isShift {
+                    if sourceFocused {
+                        if let s = workspace.sourceInMark { workspace.sourceTimeSeconds = s }
+                    } else {
+                        workspace.goToProgramIn()
+                    }
+                } else {
+                    if sourceFocused { workspace.setSourceIn() }
+                    else { workspace.setProgramIn() }
+                }
+                return nil
+            case "o":
+                let sourceFocused = workspace.focusedViewer == .source && workspace.sourceClip != nil
+                if isOption {
+                    if sourceFocused { workspace.sourceOutMark = nil }
+                    else { workspace.clearProgramOut() }
+                } else if isShift {
+                    if sourceFocused {
+                        if let s = workspace.sourceOutMark { workspace.sourceTimeSeconds = s }
+                    } else {
+                        workspace.goToProgramOut()
+                    }
+                } else {
+                    if sourceFocused { workspace.setSourceOut() }
+                    else { workspace.setProgramOut() }
+                }
+                return nil
+            case "x", "X":
+                if isOption {
+                    let sourceFocused = workspace.focusedViewer == .source && workspace.sourceClip != nil
+                    if sourceFocused { workspace.clearSourceMarks() }
+                    else { workspace.clearProgramMarks() }
+                    return nil
+                }
+                return event
+            case ",":
+                // `charactersIgnoringModifiers` strips shift here, so
+                // shift+, lands in this case with isShift=true.
+                if isShift {
+                    workspace.nudgeSelectedClips(frames: -1)
+                } else {
+                    workspace.insertFromSource()
+                }
+                return nil
+            case ".":
+                if isShift {
+                    workspace.nudgeSelectedClips(frames: 1)
+                } else {
+                    workspace.overwriteFromSource()
+                }
+                return nil
+            case "<":
+                // Fallback in case the keyboard layout reports the
+                // shifted character directly. Either matches → nudge.
+                workspace.nudgeSelectedClips(frames: -1)
+                return nil
+            case ">":
+                workspace.nudgeSelectedClips(frames: 1)
+                return nil
+            case String(Character(UnicodeScalar(NSDeleteCharacter)!)),
+                 String(Character(UnicodeScalar(NSBackspaceCharacter)!)),
+                 String(Character(UnicodeScalar(NSDeleteFunctionKey)!)),
+                 "\u{7F}":
+                if !workspace.selectedClipIDs.isEmpty {
+                    if isShift {
+                        workspace.rippleDeleteSelected()
+                    } else {
+                        workspace.deleteSelected()
+                    }
+                    return nil
+                }
+                if let cut = workspace.selectedCut {
+                    workspace.removeTransitionAtCut(cut)
+                    workspace.selectedCut = nil
+                    return nil
+                }
+                if let edge = workspace.selectedClipEdge {
+                    workspace.removeFadeAtEdge(edge)
+                    workspace.selectedClipEdge = nil
+                    return nil
+                }
+                if workspace.selectedGap != nil {
+                    workspace.deleteSelectedGap()
+                    return nil
+                }
+                return event
+            default:
+                return event
+            }
+        }
+        keyMonitor = monitor
+    }
+
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
+
+    private func exportFCPXML() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "fcpxml") ?? .xml]
+        panel.nameFieldStringValue = workspace.project.name + ".fcpxml"
+        panel.title = "Export FCPXML"
+        panel.message = "Export the media pool as an FCPXML for Premiere / Resolve / Final Cut."
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try FCPXMLExporter().write(project: workspace.project, to: url)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "FCPXML export failed"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        }
+    }
+}
+
+/// Inset accent-stroke overlay used to mark the active pane.
+/// Corner radius matches macOS's bottom window-corner curvature so the
+/// stroke around panes that touch the window edges (bin, timeline)
+/// follows the window's rounded corners cleanly.
+private struct FocusBorder: ViewModifier {
+    let isFocused: Bool
+    func body(content: Content) -> some View {
+        content.overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isFocused ? Color.accentColor.opacity(0.7) : Color.clear,
+                    lineWidth: 1
+                )
+                .allowsHitTesting(false)
+        )
+    }
+}
+
+extension View {
+    func focusBorder(_ isFocused: Bool) -> some View {
+        modifier(FocusBorder(isFocused: isFocused))
+    }
+}
+
+/// Wraps the NSView timeline with a Polymerge-style zoom bar across
+/// the bottom: minus / slider / plus + a px-per-second readout. The
+/// slider is bound to `WorkspaceModel.pixelsPerSecond` so ⌘+/⌘- and
+/// the slider stay in sync.
+private struct TimelineWithZoomBar: View {
+    @ObservedObject var workspace: WorkspaceModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TimelineHostView(workspace: workspace)
+            Divider()
+            HStack(spacing: 8) {
+                Button(action: { workspace.zoomOut() }) {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .buttonStyle(.plain)
+                ThinSlider(
+                    value: $workspace.pixelsPerSecond,
+                    range: 4...800
+                )
+                .frame(maxWidth: 360)
+                Button(action: { workspace.zoomIn() }) {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text("\(Int(workspace.pixelsPerSecond)) px/s")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color(NSColor.windowBackgroundColor))
+        }
+    }
+}
+
+private struct TimelineHostView: NSViewRepresentable {
+    @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var settings: PreemSettings = .shared
+
+    func makeNSView(context: Context) -> PreemTimelineView {
+        let view = PreemTimelineView(frame: .zero)
+        view.callbacks.insertClip = { [weak workspace] clipID, time, trackIdx in
+            Task { @MainActor in
+                workspace?.attemptInsertClip(clipID, atTime: time, videoTrackIndex: trackIdx)
+            }
+        }
+        view.callbacks.insertClipFragment = { [weak workspace] clipID, start, dur, time, trackIdx in
+            Task { @MainActor in
+                workspace?.attemptInsertClipFragment(clipID, sourceStart: start, sourceDuration: dur, atTime: time, videoTrackIndex: trackIdx)
+            }
+        }
+        view.callbacks.setPlayhead = { [weak workspace] time in
+            Task { @MainActor in workspace?.setPlayhead(time) }
+        }
+        view.callbacks.selectClip = { [weak workspace] id, additive in
+            Task { @MainActor in workspace?.select(id, additive: additive) }
+        }
+        view.callbacks.clearSelection = { [weak workspace] in
+            Task { @MainActor in workspace?.clearSelection() }
+        }
+        view.callbacks.moveClip = { [weak workspace] id, time, target in
+            let trackTarget: WorkspaceModel.TrackTarget? = {
+                guard let t = target else { return nil }
+                if t.kind == 0 { return .video(t.index) }
+                if t.kind == 1 { return .audio(t.index) }
+                return nil
+            }()
+            // Synchronous on main — the Task hop would defer the model
+            // mutation one runloop tick, causing a single-frame render
+            // with the clip on its old track right after we cleared the
+            // floating-ghost state. AppKit guarantees this fires on the
+            // main thread.
+            MainActor.assumeIsolated {
+                workspace?.moveClip(id, to: time, targetTrack: trackTarget)
+            }
+        }
+        view.callbacks.trimLeft = { [weak workspace] id, time in
+            Task { @MainActor in workspace?.trimLeft(id, to: time) }
+        }
+        view.callbacks.trimRight = { [weak workspace] id, time in
+            Task { @MainActor in workspace?.trimRight(id, to: time) }
+        }
+        view.callbacks.clipSourceForID = { [weak workspace] id in
+            workspace?.project.mediaPool.clips[id]
+        }
+        view.callbacks.requestToggleLink = { [weak workspace] in
+            Task { @MainActor in workspace?.toggleLinkOnSelection() }
+        }
+        view.callbacks.requestUnlink = { [weak workspace] in
+            Task { @MainActor in workspace?.unlinkSelection() }
+        }
+        view.callbacks.requestDeleteSelected = { [weak workspace] in
+            Task { @MainActor in workspace?.deleteSelected() }
+        }
+        view.callbacks.requestRippleDeleteSelected = { [weak workspace] in
+            Task { @MainActor in workspace?.rippleDeleteSelected() }
+        }
+        view.callbacks.selectGap = { [weak workspace] gap in
+            Task { @MainActor in workspace?.selectGap(gap) }
+        }
+        view.callbacks.selectCut = { [weak workspace] cut in
+            Task { @MainActor in workspace?.selectCut(cut) }
+        }
+        view.callbacks.requestAddTransition = { [weak workspace] cut in
+            Task { @MainActor in
+                guard let workspace else { return }
+                workspace.applyTransitionAtCut(cut)
+            }
+        }
+        view.callbacks.requestRemoveTransition = { [weak workspace] cut in
+            Task { @MainActor in workspace?.removeTransitionAtCut(cut) }
+        }
+        view.callbacks.resizeTransitionEdge = { [weak workspace] cut, side, half in
+            // Sync — mirrors moveClip pattern so the drag stays smooth.
+            MainActor.assumeIsolated {
+                if side == 0 {
+                    workspace?.resizeTransition(at: cut, leftHalf: half)
+                } else {
+                    workspace?.resizeTransition(at: cut, rightHalf: half)
+                }
+            }
+        }
+        view.callbacks.selectClipEdge = { [weak workspace] edge in
+            Task { @MainActor in workspace?.selectClipEdge(edge) }
+        }
+        view.callbacks.requestAddFade = { [weak workspace] edge in
+            Task { @MainActor in workspace?.applyFadeAtEdge(edge) }
+        }
+        view.callbacks.requestRemoveFade = { [weak workspace] edge in
+            Task { @MainActor in workspace?.removeFadeAtEdge(edge) }
+        }
+        view.callbacks.resizeSoloFade = { [weak workspace] edge, dur in
+            MainActor.assumeIsolated {
+                workspace?.applyFadeAtEdge(edge, durationSeconds: dur)
+            }
+        }
+        view.callbacks.bladeClip = { [weak workspace] clipID, t in
+            Task { @MainActor in workspace?.splitClipAndLinked(clipID, atSeconds: t) }
+        }
+        view.callbacks.setPixelsPerSecond = { [weak workspace] value in
+            MainActor.assumeIsolated {
+                workspace?.pixelsPerSecond = value
+            }
+        }
+        view.callbacks.didReceiveFocus = { [weak workspace] in
+            Task { @MainActor in workspace?.focusedViewer = .timeline }
+        }
+        view.callbacks.beginClipDragOrTrim = { [weak workspace] in
+            Task { @MainActor in workspace?.beginUndoBatch() }
+        }
+        view.callbacks.endClipDragOrTrim = { [weak workspace] clipID in
+            Task { @MainActor in
+                if let id = clipID {
+                    workspace?.finalizeOverlapsForClip(id)
+                }
+                workspace?.endUndoBatch()
+            }
+        }
+        view.callbacks.requestToggleVideoEnabled = { [weak workspace] idx in
+            Task { @MainActor in workspace?.toggleVideoTrackEnabled(at: idx) }
+        }
+        view.callbacks.requestToggleVideoLocked = { [weak workspace] idx in
+            Task { @MainActor in workspace?.toggleVideoTrackLocked(at: idx) }
+        }
+        view.callbacks.requestToggleAudioMuted = { [weak workspace] idx in
+            Task { @MainActor in workspace?.toggleAudioTrackMuted(at: idx) }
+        }
+        view.callbacks.requestToggleAudioSolo = { [weak workspace] idx in
+            Task { @MainActor in workspace?.toggleAudioTrackSolo(at: idx) }
+        }
+        view.callbacks.requestToggleAudioLocked = { [weak workspace] idx in
+            Task { @MainActor in workspace?.toggleAudioTrackLocked(at: idx) }
+        }
+        view.callbacks.requestSetVideoTarget = { [weak workspace] idx in
+            Task { @MainActor in workspace?.setVideoTarget(at: idx) }
+        }
+        view.callbacks.requestSetAudioTarget = { [weak workspace] idx in
+            Task { @MainActor in workspace?.setAudioTarget(at: idx) }
+        }
+        view.audioTrackLevelProvider = { [weak workspace] idx in
+            workspace?.audio.peakLevel(forAudioTrackIndex: idx) ?? 0
+        }
+        push(into: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: PreemTimelineView, context: Context) {
+        push(into: nsView)
+    }
+
+    private func push(into view: PreemTimelineView) {
+        view.sequence = workspace.activeSequence
+        view.clipSources = workspace.project.mediaPool.clips
+        view.playheadTime = workspace.playheadTime
+        view.selectedClipIDs = workspace.selectedClipIDs
+        view.selectedGap = workspace.selectedGap
+        view.selectedCut = workspace.selectedCut
+        view.selectedClipEdge = workspace.selectedClipEdge
+        view.snappingEnabled = settings.snappingEnabled
+        view.activeTool = workspace.activeTool
+        view.pixelsPerSecond = workspace.pixelsPerSecond
+        view.cacheSegmentsSeconds = workspace.cacheSegmentsForActiveSequence()
+            .map { (start: $0.startSeconds, end: $0.endSeconds) }
+
+        // Push the latest preview snapshots into the timeline view.
+        // `previewVersion` ticks each time the cache commits, which
+        // pulls SwiftUI through `updateNSView` and into this push.
+        let snapshot = workspace.previewCache.snapshot()
+        view.audioPeaks = snapshot.waveforms.mapValues { $0.peaks }
+        view.videoThumbnails = snapshot.thumbs.mapValues { $0.images }
+        _ = workspace.previewVersion
+
+        // Audio meters update via SwiftUI's playhead-driven re-renders
+        // (playheadTime ticks at 60Hz while playing, which retriggers
+        // updateNSView and forces a redraw with fresh meter values).
+    }
+}
