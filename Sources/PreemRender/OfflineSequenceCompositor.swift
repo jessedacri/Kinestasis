@@ -568,6 +568,23 @@ public final class OfflineSequenceCompositor {
         public var weights:  SIMD4<Float>   // .x = wA, .y = wB; rest reserved
     }
 
+    /// Seed frame sources for the layers active at `timelineSeconds`
+    /// without rendering — warms decoders before the playhead crosses
+    /// from a cached region into live compositing so the first live
+    /// frame doesn't stall on a cold seek. Best-effort; errors are
+    /// swallowed (a failed warm just means the seek happens later).
+    public func prewarm(at timelineSeconds: Double) async {
+        let probe = RationalTime(value: Int64(timelineSeconds * 1000), scale: 1000)
+        for track in sequence.videoTracks {
+            guard let clip = track.clips.first(where: { $0.timelineRange.contains(probe) }),
+                  let source = mediaPool.clips[clip.sourceClipID] else { continue }
+            let clipLocal = timelineSeconds - clip.timelineRange.start.seconds
+            let shift = pairedFadeInSourceShift(for: clip, in: track)
+            let sourceTime = clip.sourceRange.start.seconds + clipLocal + shift
+            _ = try? await pullFrame(source: source, atSourceTime: sourceTime)
+        }
+    }
+
     private func effectiveLayers(at t: Double) async throws -> [LayerContribution] {
         var layers: [LayerContribution] = []
         let probe = RationalTime(value: Int64(t * 1000), scale: 1000)
@@ -827,6 +844,10 @@ public final class OfflineSequenceCompositor {
         }
 
         let fs = try await ensureFrameSource(for: source)
+        let nominalDur = CMTime(
+            seconds: 1.0 / max(1.0, fs.nominalFrameRate),
+            preferredTimescale: 600
+        )
         let prev = lastSourceTime[source.id]
         // Backward jump → reseek. Forward by < 0.5 s we can walk to
         // via nextFrame.
@@ -836,7 +857,16 @@ public final class OfflineSequenceCompositor {
             return t - p > 0.5
         }()
         if needsSeek {
-            try await fs.seek(to: target)
+            // Seek one frame BEFORE target. AVAssetReader delivers frames
+            // with pts >= the range start, so seeking exactly to `target`
+            // skips the frame that *contains* target (its pts < target)
+            // and the walk below returns a frame ~1 frame in the future —
+            // a visible 1-frame glitch on every cold seek (clip first
+            // appearing at a transition, cache→live crossover). Backing
+            // up a frame puts the containing frame inside the reader's
+            // range so the walk lands on it.
+            let seekTarget = CMTimeMaximum(.zero, CMTimeSubtract(target, nominalDur))
+            try await fs.seek(to: seekTarget)
             // Cached frame is no longer authoritative after a seek.
             lastDeliveredFrame.removeValue(forKey: source.id)
         }
@@ -848,10 +878,6 @@ public final class OfflineSequenceCompositor {
         // the cache instead of advancing the source again — that's
         // what keeps a 24 fps source from playing at 60+ Hz when the
         // realtime host ticks at the display's refresh rate.
-        let nominalDur = CMTime(
-            seconds: 1.0 / max(1.0, fs.nominalFrameRate),
-            preferredTimescale: 600
-        )
         var lastFrame: PPEDecodedFrame?
         for _ in 0..<16 {
             guard let f = try await fs.nextFrame() else { break }

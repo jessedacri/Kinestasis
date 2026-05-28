@@ -72,6 +72,12 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
         // Cheap signal for "the set of clips changed" — gates source
         // pruning so steady-state playback allocates nothing per tick.
         private var lastClipCount = -1
+        // Cache-segment end we've already pre-warmed live sources for, so
+        // we only warm once per boundary approach.
+        private var lastPrewarmedSegEnd: Double?
+        // How far ahead of a cache segment's end to start warming the
+        // live compositor's decoders, in seconds.
+        static let prewarmLead: Double = 0.3
 
         // True when a compose+present task is mid-flight. If the
         // display link fires another tick before the previous finishes,
@@ -174,13 +180,42 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             // Snapshot everything compose needs while we're still on
             // main. After this point we never touch workspace from
             // the background.
-            let playhead = workspace.playheadTime.seconds
+            //
+            // Frame-quantize the compose time to the sequence grid. The
+            // program monitor must show exactly the frame the render
+            // would produce — not an oversampled in-between sampled at
+            // the display's refresh rate. This is what makes an eased
+            // transform animate identically in preview and in the
+            // rendered file. It also stabilizes the per-source frame
+            // cache: every display tick inside one sequence frame maps
+            // to the same source time, so `pullFrame` hits its hold
+            // cache instead of re-seeking.
+            let playhead = Self.quantizeToFrame(
+                workspace.playheadTime.seconds,
+                frameRate: workspace.activeSequence?.settings.frameRate
+            )
             let cacheSeg = workspace.cacheSegmentAtPlayhead()
             let reader: CacheFrameReader? = cacheSeg.flatMap { cacheFrameReader(for: $0.url) }
             let segStart = cacheSeg?.startSeconds ?? 0
+            let segEnd = cacheSeg?.endSeconds ?? 0
             let device = self.device
             let queue = self.commandQueue
             let cmp = self.compositor
+
+            // When playing from cache and approaching its end, warm the
+            // live compositor's decoders at the first post-cache frame so
+            // crossing back into live compositing doesn't stall on a cold
+            // seek. Fires once per segment boundary; cheap after the first
+            // seed (the per-source hold cache absorbs repeats).
+            var prewarmTime: Double? = nil
+            if reader != nil, cmp != nil,
+               segEnd - playhead <= Self.prewarmLead, segEnd - playhead > 0,
+               lastPrewarmedSegEnd != segEnd {
+                prewarmTime = Self.quantizeToFrame(
+                    segEnd, frameRate: workspace.activeSequence?.settings.frameRate
+                )
+                lastPrewarmedSegEnd = segEnd
+            }
 
             inFlight = true
             let started = Date()
@@ -202,6 +237,9 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                         queue: queue,
                         compositor: cmp
                     )
+                    if let cmp, let prewarmTime {
+                        await cmp.prewarm(at: prewarmTime)
+                    }
                 } else if let cmp {
                     do {
                         try await cmp.composeAsync(at: playhead, into: drawable.texture)
@@ -217,6 +255,16 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                     self?.noteDuration(started: started)
                 }
             }
+        }
+
+        /// Snap a timeline time down to the sequence frame grid (anchored
+        /// at 0, matching a full-sequence render). Returns the input
+        /// unchanged if there's no active sequence / invalid rate.
+        static func quantizeToFrame(_ seconds: Double, frameRate: FrameRate?) -> Double {
+            guard let frameRate else { return seconds }
+            let spf = Double(frameRate.rationalScale) / Double(max(1, frameRate.rationalRate))
+            guard spf > 0 else { return seconds }
+            return (seconds / spf).rounded(.down) * spf
         }
 
         private func noteDuration(started: Date) {
@@ -421,7 +469,13 @@ public final class CacheFrameReader: @unchecked Sendable {
             return false
         }()
         if needsSeek {
-            try? restart(at: target)
+            // Seek one frame before target: AVAssetReader delivers frames
+            // with pts >= the range start, so seeking exactly to target
+            // skips the frame that contains it and we'd show a frame ~1
+            // frame ahead. Backing up a frame keeps the containing frame
+            // in range so the walk lands on it.
+            let oneFrame = CMTime(seconds: 1.0 / max(1.0, nominalFrameRate), preferredTimescale: 600)
+            try? restart(at: CMTimeMaximum(.zero, CMTimeSubtract(target, oneFrame)))
         }
 
         // Fast path: target lies inside the last frame's [pts, pts+dur)
