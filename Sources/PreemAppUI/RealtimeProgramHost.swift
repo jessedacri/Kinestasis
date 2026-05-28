@@ -75,11 +75,6 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
         // Cache-segment end we've already pre-warmed live sources for, so
         // we only warm once per boundary approach.
         private var lastPrewarmedSegEnd: Double?
-        // Quantized timeline time of the last frame we composed. During
-        // playback, ticks that land on the same sequence frame are
-        // skipped — the picture is identical, so recomposing it 2-3× per
-        // frame (display rate ÷ sequence fps) is wasted GPU work.
-        private var lastComposedPlayhead: Double?
         // How far ahead of a cache segment's end to start warming the
         // live compositor's decoders, in seconds.
         static let prewarmLead: Double = 0.3
@@ -165,17 +160,17 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
 
             ensureCompositorMatchesSequence()
 
-            // Frame de-dupe during playback: if this display tick lands on
-            // the same sequence frame we just composed, the picture is
-            // identical — skip the whole compose+present. Only while
-            // playing; when paused we must still recompose so live edits
-            // (transform drags, keyframe toggles, scrubs) show up.
+            // Present on EVERY display refresh, even when the quantized
+            // sequence frame is unchanged. Skipping the present on
+            // repeat-frame ticks makes presents land at irregular
+            // intervals relative to vsync (e.g. the 3:2 cadence of 24 fps
+            // on a 60 Hz display) and reads as rhythmic judder. Regular
+            // per-vsync presentation of the (possibly identical) frame is
+            // what keeps playback smooth.
             let frameNow = Self.quantizeToFrame(
                 workspace.playheadTime.seconds,
                 frameRate: workspace.activeSequence?.settings.frameRate
             )
-            let programPlaying: Bool = { if case .program = workspace.playbackState { return true }; return false }()
-            if programPlaying, lastComposedPlayhead == frameNow { return }
 
             let viewScale = view.window?.backingScaleFactor ?? 2.0
             let neededSize = CGSize(
@@ -230,7 +225,6 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             }
 
             inFlight = true
-            lastComposedPlayhead = frameNow
             let started = Date()
 
             Task.detached(priority: .userInitiated) { [weak self] in
