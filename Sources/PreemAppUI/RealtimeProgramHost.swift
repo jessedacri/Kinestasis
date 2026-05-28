@@ -75,6 +75,11 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
         // Cache-segment end we've already pre-warmed live sources for, so
         // we only warm once per boundary approach.
         private var lastPrewarmedSegEnd: Double?
+        // Quantized timeline time of the last frame we composed. During
+        // playback, ticks that land on the same sequence frame are
+        // skipped — the picture is identical, so recomposing it 2-3× per
+        // frame (display rate ÷ sequence fps) is wasted GPU work.
+        private var lastComposedPlayhead: Double?
         // How far ahead of a cache segment's end to start warming the
         // live compositor's decoders, in seconds.
         static let prewarmLead: Double = 0.3
@@ -159,6 +164,19 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             if inFlight { return }
 
             ensureCompositorMatchesSequence()
+
+            // Frame de-dupe during playback: if this display tick lands on
+            // the same sequence frame we just composed, the picture is
+            // identical — skip the whole compose+present. Only while
+            // playing; when paused we must still recompose so live edits
+            // (transform drags, keyframe toggles, scrubs) show up.
+            let frameNow = Self.quantizeToFrame(
+                workspace.playheadTime.seconds,
+                frameRate: workspace.activeSequence?.settings.frameRate
+            )
+            let programPlaying: Bool = { if case .program = workspace.playbackState { return true }; return false }()
+            if programPlaying, lastComposedPlayhead == frameNow { return }
+
             let viewScale = view.window?.backingScaleFactor ?? 2.0
             let neededSize = CGSize(
                 width: max(1, view.bounds.width * viewScale),
@@ -181,19 +199,13 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             // main. After this point we never touch workspace from
             // the background.
             //
-            // Frame-quantize the compose time to the sequence grid. The
-            // program monitor must show exactly the frame the render
-            // would produce — not an oversampled in-between sampled at
-            // the display's refresh rate. This is what makes an eased
-            // transform animate identically in preview and in the
-            // rendered file. It also stabilizes the per-source frame
-            // cache: every display tick inside one sequence frame maps
-            // to the same source time, so `pullFrame` hits its hold
-            // cache instead of re-seeking.
-            let playhead = Self.quantizeToFrame(
-                workspace.playheadTime.seconds,
-                frameRate: workspace.activeSequence?.settings.frameRate
-            )
+            // Frame-quantized compose time (see `frameNow` above): the
+            // monitor shows exactly the frame the render would produce,
+            // not an oversampled in-between. Also stabilizes the
+            // per-source frame cache — every tick inside one sequence
+            // frame maps to the same source time, so `pullFrame` holds
+            // its cache instead of re-seeking.
+            let playhead = frameNow
             let cacheSeg = workspace.cacheSegmentAtPlayhead()
             let reader: CacheFrameReader? = cacheSeg.flatMap { cacheFrameReader(for: $0.url) }
             let segStart = cacheSeg?.startSeconds ?? 0
@@ -218,6 +230,7 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             }
 
             inFlight = true
+            lastComposedPlayhead = frameNow
             let started = Date()
 
             Task.detached(priority: .userInitiated) { [weak self] in
