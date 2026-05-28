@@ -337,17 +337,6 @@ struct EffectControlsContent: View {
         }
     }
 
-    @ViewBuilder
-    private func paramRow<Content: View>(
-        label: String,
-        parameter: TransformParameter,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        row(label: label, stopwatch: { stopwatchButton(active: paramKeyed(parameter)) { workspace.toggleKeyframingOnSelection(parameter) } }) {
-            content()
-        }
-    }
-
     // MARK: - Reusable widgets
 
     @ViewBuilder

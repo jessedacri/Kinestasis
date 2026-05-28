@@ -78,23 +78,6 @@ public enum PreRenderCache {
         }
     }
 
-    /// Look up an on-disk segment containing `timelineSeconds` for the
-    /// given sequence. Returns nil if no segment covers that time. Used
-    /// by the playback substitution path to decide whether to read from
-    /// cache or run the live PPE.
-    public static func segmentContaining(
-        timelineSeconds: Double,
-        forProjectID projectID: UUID,
-        sequenceID: SequenceID
-    ) -> (url: URL, startMs: Int64, endMs: Int64)? {
-        for seg in allSegments(forProjectID: projectID, sequenceID: sequenceID) {
-            let tMs = Int64(timelineSeconds * 1000)
-            if seg.startMs <= tMs && tMs < seg.endMs {
-                return (seg.url, seg.startMs, seg.endMs)
-            }
-        }
-        return nil
-    }
 
     /// Enumerate every on-disk segment for the given sequence. Used by
     /// the timeline ruler overlay and by playback-substitution lookups.

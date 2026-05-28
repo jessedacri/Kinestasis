@@ -1703,14 +1703,6 @@ public final class PreemTimelineView: NSView {
         return out
     }
 
-    private func trackName(_ lane: Lane) -> String {
-        switch lane {
-        case .video(let t): return t.name
-        case .audio(let t): return t.name
-        case .separator:    return ""
-        }
-    }
-
     // MARK: - Time ↔ pixel
 
     private func xForTime(_ seconds: Double) -> CGFloat {

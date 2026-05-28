@@ -195,6 +195,7 @@ public final class WorkspaceModel: ObservableObject {
         for seq in restored.sequences {
             PreRenderCache.clearAll(forProjectID: restored.id, sequenceID: seq.id)
         }
+        refreshRenderSegmentCache()
         audio.invalidate(); sourceAudio.invalidate()
         markDirty()
     }
@@ -825,6 +826,7 @@ public final class WorkspaceModel: ObservableObject {
     /// O(num_segments) FileManager ops otherwise.
     private func invalidatePreRenderCache(for sequenceID: SequenceID) {
         PreRenderCache.clearAll(forProjectID: project.id, sequenceID: sequenceID)
+        if sequenceID == activeSequenceID { refreshRenderSegmentCache() }
     }
 
     /// Pull `keepID` out, run `splitOverlappingClips` on the rest, then
@@ -1190,7 +1192,8 @@ public final class WorkspaceModel: ObservableObject {
                 return
             }
         }
-        playheadTime = RationalTime(value: Int64(new * 1000), scale: 1000)
+        let q = RationalTime(value: Int64(new * 1000), scale: 1000)
+        if q != playheadTime { playheadTime = q }
     }
 
     private func sourceTick() {
@@ -1216,7 +1219,7 @@ public final class WorkspaceModel: ObservableObject {
             } else if new >= maxSeconds {
                 sourceTimeSeconds = maxSeconds
                 setPlayback(.stopped)
-            } else {
+            } else if new != sourceTimeSeconds {
                 sourceTimeSeconds = new
             }
             return
@@ -1230,7 +1233,7 @@ public final class WorkspaceModel: ObservableObject {
         } else if new > maxSeconds {
             sourceTimeSeconds = maxSeconds
             setPlayback(.stopped)
-        } else {
+        } else if new != sourceTimeSeconds {
             sourceTimeSeconds = new
         }
     }
@@ -1480,6 +1483,7 @@ public final class WorkspaceModel: ObservableObject {
             overlapping: startMs, endMs,
             forProjectID: projectID, sequenceID: sequenceID
         )
+        if sequenceID == activeSequenceID { refreshRenderSegmentCache() }
 
         let encoder: SequenceEncoder
         do {
@@ -1524,6 +1528,7 @@ public final class WorkspaceModel: ObservableObject {
                     self.renderProgress = nil
                     self.lastRenderURL = outputURL
                     self.activeEncoder = nil
+                    self.refreshRenderSegmentCache()
                     PreemDebugLog.log("[Render] wrote \(outputURL.path)")
                 }
             } catch {
@@ -1755,21 +1760,42 @@ public final class WorkspaceModel: ObservableObject {
     /// On-disk pre-render segment containing the current playhead, if
     /// any. Drives the program viewer's "cache playback" path.
     public func cacheSegmentAtPlayhead() -> (url: URL, startSeconds: Double, endSeconds: Double)? {
-        guard let sequence = activeSequence else { return nil }
-        guard let seg = PreRenderCache.segmentContaining(
-            timelineSeconds: playheadTime.seconds,
-            forProjectID: project.id,
-            sequenceID: sequence.id
-        ) else { return nil }
-        return (seg.url, Double(seg.startMs) / 1000.0, Double(seg.endMs) / 1000.0)
+        let tMs = Int64(playheadTime.seconds * 1000)
+        for seg in renderSegments() where seg.startMs <= tMs && tMs < seg.endMs {
+            return (seg.url, Double(seg.startMs) / 1000.0, Double(seg.endMs) / 1000.0)
+        }
+        return nil
     }
 
     /// Every cached segment for the active sequence (start..end seconds).
     /// Used by the timeline ruler to render its green "rendered" bars.
     public func cacheSegmentsForActiveSequence() -> [(startSeconds: Double, endSeconds: Double)] {
-        guard let sequence = activeSequence else { return [] }
-        return PreRenderCache.allSegments(forProjectID: project.id, sequenceID: sequence.id)
-            .map { (Double($0.startMs) / 1000.0, Double($0.endMs) / 1000.0) }
+        renderSegments().map { (Double($0.startMs) / 1000.0, Double($0.endMs) / 1000.0) }
+    }
+
+    // In-memory mirror of the on-disk pre-render segment list. Read by
+    // the realtime tick and the ruler; refreshed only on mutation
+    // (render complete, cache clear, sequence switch) so the hot path
+    // never touches the filesystem.
+    private var renderSegmentCache: [(url: URL, startMs: Int64, endMs: Int64)] = []
+    private var renderSegmentCacheSequenceID: SequenceID?
+
+    private func renderSegments() -> [(url: URL, startMs: Int64, endMs: Int64)] {
+        if renderSegmentCacheSequenceID != activeSequenceID {
+            refreshRenderSegmentCache()
+        }
+        return renderSegmentCache
+    }
+
+    private func refreshRenderSegmentCache() {
+        guard let sequence = activeSequence else {
+            renderSegmentCache = []
+            renderSegmentCacheSequenceID = nil
+            return
+        }
+        renderSegmentCache = PreRenderCache.allSegments(
+            forProjectID: project.id, sequenceID: sequence.id)
+        renderSegmentCacheSequenceID = sequence.id
     }
 
     private func renderRange(in sequence: Sequence) -> (Double, Double) {
@@ -2338,485 +2364,6 @@ public final class WorkspaceModel: ObservableObject {
             }
             sequence.audioTracks[trackIdx].clips.sort { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
         }
-    }
-
-    /// Snapshot of what each PPE host should render right now, plus the
-    /// per-host opacity for the program viewer's ZStack. Computed each
-    /// `pushUpdate` tick. Supports two cases:
-    ///   - **Cross dissolve** between two abutting clips A → B. Primary
-    ///     PPE holds A; secondary holds B with rising opacity. After the
-    ///     dissolve's natural end, primary is pre-swapped to B and the
-    ///     secondary covers the swap by staying opaque for a brief tail.
-    ///   - **Solo fade-in / fade-out** on a single clip. Primary holds
-    ///     that clip; secondary is unused. Primary's opacity carries
-    ///     the fade — `Color.black` behind it gives the fade-to-black
-    ///     visual on V1.
-    public struct ActiveTransition: Equatable {
-        public enum Mode: Equatable {
-            case crossDissolve
-            case fadeIn
-            case fadeOut
-        }
-        public let mode: Mode
-        public let primaryClip: PlacedClip
-        public let primarySource: ClipSource
-        public let secondaryClip: PlacedClip?
-        public let secondarySource: ClipSource?
-        public let primaryOpacity: Double
-        public let secondaryOpacity: Double
-        public let progress: Double
-        public let inHandoverTail: Bool
-        /// Identifies the cut + clip-edges this transition was derived
-        /// from. Used by the timeline view to highlight the matching
-        /// wedge/edge handles. Nil fields where not applicable.
-        public let cutContext: CutSelection?
-        public let edgeContext: ClipEdgeSelection?
-        /// When non-nil, the secondary PPE should hold this source-time
-        /// (paused) instead of advancing with the playhead. Drives the
-        /// pre-warm: PPE seeks once to a stable target and fills its
-        /// frame queue, so when the visible fade starts it plays at 1×
-        /// instead of fast-forwarding to catch up after the video swap.
-        public let secondaryHoldSourceTime: Double?
-
-        public static func == (lhs: ActiveTransition, rhs: ActiveTransition) -> Bool {
-            lhs.mode == rhs.mode
-            && lhs.primaryClip.id == rhs.primaryClip.id
-            && lhs.secondaryClip?.id == rhs.secondaryClip?.id
-            && lhs.primaryOpacity == rhs.primaryOpacity
-            && lhs.secondaryOpacity == rhs.secondaryOpacity
-            && lhs.progress == rhs.progress
-            && lhs.inHandoverTail == rhs.inHandoverTail
-            && lhs.secondaryHoldSourceTime == rhs.secondaryHoldSourceTime
-        }
-    }
-
-    /// Handover-tail length (seconds). Keeps the secondary layer fully
-    /// opaque past the dissolve's natural end so the primary PPE has
-    /// time to swap to the incoming clip without the swap flashing
-    /// through. Empirically ~200 ms covers a debug-build PPE reload on
-    /// Apple Silicon with PPE's default 0.5 s lookahead.
-    private static let transitionHandoverTail: Double = 0.2
-
-    /// Pre-warm lead (seconds). Before the dissolve's natural start the
-    /// secondary PPE is fed the incoming clip + paused frame so PPE's
-    /// background decoder can prime its frame queue. Without this the
-    /// incoming clip looks frozen on its first frame for the first
-    /// 200-400 ms of the dissolve while PPE catches up.
-    private static let transitionPreWarmLead: Double = 0.5
-
-    /// Returns the seconds the playback mapping is shifted forward by
-    /// for a clip that has a paired transitionIn on an abutting prev.
-    /// The incoming clip's source-time advances at 1× from its in-point
-    /// starting at the dissolve's pre-cut boundary, so B's footage has
-    /// real motion during the fade-in instead of freezing on frame 1.
-    /// Trade-off: the first `leftHalf` seconds of B's source content
-    /// are consumed by the dissolve, so B's tail may silence/freeze
-    /// if it runs out of source — same compromise Premiere requires
-    /// (handles) to avoid.
-    public func playbackShiftForPairedFadeIn(_ clip: PlacedClip, in sequence: Sequence) -> Double {
-        // Find which track the clip is on; check its abutting prev's
-        // transitionOut. Paired means: both adjacent clips abut AND
-        // both carry transitions.
-        guard clip.transitionIn != nil else { return 0 }
-        for track in sequence.videoTracks {
-            let sorted = track.clips.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
-            guard let i = sorted.firstIndex(where: { $0.id == clip.id }), i > 0 else { continue }
-            let prev = sorted[i - 1]
-            if abs(prev.timelineRange.end.seconds - clip.timelineRange.start.seconds) < 0.001,
-               let prevOut = prev.transitionOut {
-                return prevOut.duration.seconds
-            }
-            return 0
-        }
-        for track in sequence.audioTracks {
-            let sorted = track.clips.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
-            guard let i = sorted.firstIndex(where: { $0.id == clip.id }), i > 0 else { continue }
-            let prev = sorted[i - 1]
-            if abs(prev.timelineRange.end.seconds - clip.timelineRange.start.seconds) < 0.001,
-               let prevOut = prev.transitionOut {
-                return prevOut.duration.seconds
-            }
-        }
-        return 0
-    }
-
-    /// Returns the current cross-dissolve or solo fade for the topmost
-    /// video clip at the playhead, or nil. Drives the dual-PPE blend.
-    public var activeVideoTransition: ActiveTransition? {
-        guard let sequence = activeSequence else { return nil }
-        let t = playheadTime.seconds
-
-        // 1) Cross dissolves first — they take precedence over solo
-        //    fades on the same cut.
-        for (videoTrackIdx, track) in sequence.videoTracks.enumerated().reversed() {
-            let sorted = track.clips.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
-            guard sorted.count >= 2 else { continue }
-            for i in 0..<(sorted.count - 1) {
-                let a = sorted[i]
-                let b = sorted[i + 1]
-                guard abs(a.timelineRange.end.seconds - b.timelineRange.start.seconds) < 0.001 else { continue }
-                guard let tOut = a.transitionOut, let tIn = b.transitionIn, tOut.kind == tIn.kind else { continue }
-                let leftHalf = tOut.duration.seconds
-                let rightHalf = tIn.duration.seconds
-                let totalDur = leftHalf + rightHalf
-                guard totalDur > 0 else { continue }
-                let cutT = a.timelineRange.end.seconds
-                let start = cutT - leftHalf
-                let end = cutT + rightHalf
-                let visibleStart = max(0, start - Self.transitionPreWarmLead)
-                let visibleEnd = end + Self.transitionHandoverTail
-                guard t >= visibleStart, t <= visibleEnd else { continue }
-                guard let sa = project.mediaPool.clips[a.sourceClipID],
-                      let sb = project.mediaPool.clips[b.sourceClipID] else { continue }
-
-                let inPreWarm = t < start
-                let inTail = t > end
-                // Visible blend factor; pre-warm holds at 0, tail at 1.
-                let dissolveProgress: Double
-                let secondaryOpacity: Double
-                if inPreWarm {
-                    dissolveProgress = 0
-                    secondaryOpacity = 0
-                } else if inTail {
-                    dissolveProgress = 1
-                    secondaryOpacity = 1
-                } else {
-                    dissolveProgress = (t - start) / totalDur
-                    secondaryOpacity = dissolveProgress
-                }
-                // Primary stays on outgoing through pre-warm + dissolve;
-                // pre-swaps to incoming during the handover tail so the
-                // secondary's fade-out lands on a primary already showing B.
-                let primary: PlacedClip = inTail ? b : a
-                let primarySource: ClipSource = inTail ? sb : sa
-                let cutContext = CutSelection(
-                    trackKind: 0, trackIndex: videoTrackIdx,
-                    cutSeconds: cutT, leftClipID: a.id, rightClipID: b.id
-                )
-                // During pre-warm, hold B at its in-point (the first
-                // frame the dissolve will reveal) so PPE seeks once
-                // and stays put while the decoder fills, instead of
-                // advancing then racing to catch up when visible.
-                let secondaryHold: Double? = inPreWarm
-                    ? (b.sourceRange.start.seconds)
-                    : nil
-                return ActiveTransition(
-                    mode: .crossDissolve,
-                    primaryClip: primary, primarySource: primarySource,
-                    secondaryClip: b, secondarySource: sb,
-                    primaryOpacity: 1.0,
-                    secondaryOpacity: secondaryOpacity,
-                    progress: dissolveProgress,
-                    inHandoverTail: inTail,
-                    cutContext: cutContext, edgeContext: nil,
-                    secondaryHoldSourceTime: secondaryHold
-                )
-            }
-        }
-
-        // 2) Solo fades over an underlying clip — UNIFIED MODEL.
-        //
-        //    Instead of swapping which clip each PPE holds at fade
-        //    boundaries (the source of the "fast motion" glitch the
-        //    user hit), we keep PPE assignments fixed for V2's entire
-        //    range:
-        //      - primary    = underlying V1   (constant)
-        //      - secondary  = the fading V2   (constant)
-        //
-        //    Opacity carries the fade direction:
-        //      - pre-V2 (pre-warm window): secondary alpha 0, holding
-        //                                  V2's first frame so PPE can
-        //                                  fill its queue.
-        //      - inside fade-in window:    alpha rises 0 → 1
-        //      - middle (no fade active):  alpha = 1, V2 fully visible
-        //      - inside fade-out window:   alpha falls 1 → 0
-        //      - tail past V2.end:         alpha = 0 so secondary can
-        //                                  release the clip cleanly.
-        //
-        //    Both PPEs play continuously at 1× through V2's whole
-        //    range — no reloads, no decoder catch-up.
-        for (videoTrackIdx, track) in sequence.videoTracks.enumerated().reversed() {
-            let sorted = track.clips.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
-            for (i, clip) in sorted.enumerated() {
-                guard let source = project.mediaPool.clips[clip.sourceClipID] else { continue }
-                let clipStart = clip.timelineRange.start.seconds
-                let clipEnd = clip.timelineRange.end.seconds
-
-                let pairedLeft: Bool = {
-                    guard i > 0 else { return false }
-                    let prev = sorted[i - 1]
-                    return abs(prev.timelineRange.end.seconds - clipStart) < 0.001
-                        && prev.transitionOut != nil
-                }()
-                let pairedRight: Bool = {
-                    guard i + 1 < sorted.count else { return false }
-                    let next = sorted[i + 1]
-                    return abs(next.timelineRange.start.seconds - clipEnd) < 0.001
-                        && next.transitionIn != nil
-                }()
-                let hasSoloIn = clip.transitionIn != nil && !pairedLeft
-                let hasSoloOut = clip.transitionOut != nil && !pairedRight
-
-                // No solo fade on this clip — skip unified path; the
-                // fade-from-black fallback below handles standalone
-                // cases when there's no underlying clip.
-                guard hasSoloIn || hasSoloOut else { continue }
-
-                if let underlying = underlyingVideoClipAndSource(
-                    at: t, aboveTrackIndex: videoTrackIdx, in: sequence
-                ) {
-                    let preWarmStart = max(0, clipStart - Self.transitionPreWarmLead)
-                    let tailEnd = clipEnd + Self.transitionHandoverTail
-                    guard t >= preWarmStart, t <= tailEnd else { continue }
-
-                    let inPreWarm = t < clipStart
-                    let inTail = t > clipEnd
-                    var secOpacity: Double
-                    if inPreWarm || inTail {
-                        secOpacity = 0
-                    } else {
-                        secOpacity = 1.0
-                        if hasSoloIn, let tIn = clip.transitionIn {
-                            let endIn = clipStart + tIn.duration.seconds
-                            if t < endIn {
-                                secOpacity = (t - clipStart) / tIn.duration.seconds
-                            }
-                        }
-                        if hasSoloOut, let tOut = clip.transitionOut {
-                            let startOut = clipEnd - tOut.duration.seconds
-                            if t > startOut {
-                                secOpacity = (clipEnd - t) / tOut.duration.seconds
-                            }
-                        }
-                        secOpacity = max(0, min(1, secOpacity))
-                    }
-
-                    let mode: ActiveTransition.Mode = (hasSoloOut && t > (clipEnd - (clip.transitionOut?.duration.seconds ?? 0)))
-                        ? .fadeOut
-                        : .fadeIn
-                    let edge = ClipEdgeSelection(
-                        clipID: clip.id, trackKind: 0,
-                        trackIndex: videoTrackIdx,
-                        side: mode == .fadeIn ? .left : .right
-                    )
-                    let secondaryHold: Double? = inPreWarm ? clip.sourceRange.start.seconds : nil
-                    return ActiveTransition(
-                        mode: mode,
-                        primaryClip: underlying.0, primarySource: underlying.1,
-                        secondaryClip: clip, secondarySource: source,
-                        primaryOpacity: 1.0,
-                        secondaryOpacity: secOpacity,
-                        progress: secOpacity,
-                        inHandoverTail: inTail,
-                        cutContext: nil, edgeContext: edge,
-                        secondaryHoldSourceTime: secondaryHold
-                    )
-                }
-
-                // No underlying — fall through to the fade-from-black
-                // path below.
-
-                // Fade IN: clip has transitionIn that isn't paired with
-                // a previous abutting clip's transitionOut.
-                if let tIn = clip.transitionIn {
-                    let pairedLeft: Bool = {
-                        guard i > 0 else { return false }
-                        let prev = sorted[i - 1]
-                        return abs(prev.timelineRange.end.seconds - clipStart) < 0.001
-                            && prev.transitionOut != nil
-                    }()
-                    if !pairedLeft {
-                        let dur = tIn.duration.seconds
-                        let endT = clipStart + dur
-                        let underlying = underlyingVideoClipAndSource(
-                            at: t, aboveTrackIndex: videoTrackIdx, in: sequence
-                        )
-                        // Pre-warm window: feed the upcoming fading
-                        // clip to the secondary PPE BEFORE the visible
-                        // fade so its decoder has frames ready when
-                        // secondary opacity starts rising. Without
-                        // this the user sees the underlying alone for
-                        // the first 200-400 ms of the fade while PPE
-                        // catches up.
-                        let preWarmStart = max(0, clipStart - Self.transitionPreWarmLead)
-                        let visibleEnd = endT + (underlying != nil ? Self.transitionHandoverTail : 0)
-                        if t >= preWarmStart, t <= visibleEnd, dur > 0 {
-                            let inPreWarm = t < clipStart
-                            let inTail = t > endT
-                            let rawProgress: Double
-                            let secOpacity: Double
-                            if inPreWarm {
-                                rawProgress = 0
-                                secOpacity = 0
-                            } else if inTail {
-                                rawProgress = 1
-                                secOpacity = 1
-                            } else {
-                                rawProgress = (t - clipStart) / dur
-                                secOpacity = rawProgress
-                            }
-                            let edge = ClipEdgeSelection(
-                                clipID: clip.id, trackKind: 0,
-                                trackIndex: videoTrackIdx, side: .left
-                            )
-                            if let underlying = underlying {
-                                let primaryClip: PlacedClip = inTail ? clip : underlying.0
-                                let primarySource: ClipSource = inTail ? source : underlying.1
-                                // Hold the secondary at the fading
-                                // clip's in-point during pre-warm so
-                                // PPE's decoder settles before the
-                                // fade is visible.
-                                let secondaryHold: Double? = inPreWarm
-                                    ? (clip.sourceRange.start.seconds)
-                                    : nil
-                                return ActiveTransition(
-                                    mode: .fadeIn,
-                                    primaryClip: primaryClip, primarySource: primarySource,
-                                    secondaryClip: clip, secondarySource: source,
-                                    primaryOpacity: 1.0,
-                                    secondaryOpacity: secOpacity,
-                                    progress: rawProgress,
-                                    inHandoverTail: inTail,
-                                    cutContext: nil, edgeContext: edge,
-                                    secondaryHoldSourceTime: secondaryHold
-                                )
-                            }
-                            // No underlying clip — fade from black via
-                            // primary opacity. Skip pre-warm here since
-                            // primary stays on the fading clip the
-                            // whole time so no reload.
-                            guard !inPreWarm else { continue }
-                            return ActiveTransition(
-                                mode: .fadeIn,
-                                primaryClip: clip, primarySource: source,
-                                secondaryClip: nil, secondarySource: nil,
-                                primaryOpacity: rawProgress,
-                                secondaryOpacity: 0,
-                                progress: rawProgress,
-                                inHandoverTail: false,
-                                cutContext: nil, edgeContext: edge,
-                                secondaryHoldSourceTime: nil
-                            )
-                        }
-                    }
-                }
-
-                // Fade OUT: clip has transitionOut that isn't paired
-                // with a next abutting clip's transitionIn.
-                if let tOut = clip.transitionOut {
-                    let pairedRight: Bool = {
-                        guard i + 1 < sorted.count else { return false }
-                        let next = sorted[i + 1]
-                        return abs(next.timelineRange.start.seconds - clipEnd) < 0.001
-                            && next.transitionIn != nil
-                    }()
-                    if !pairedRight {
-                        let dur = tOut.duration.seconds
-                        let startT = clipEnd - dur
-                        let underlying = underlyingVideoClipAndSource(
-                            at: t, aboveTrackIndex: videoTrackIdx, in: sequence
-                        )
-                        // Pre-warm the secondary with the UNDERLYING
-                        // clip BEFORE the fade-out starts so its
-                        // decoder has frames ready when the secondary
-                        // begins to fade in. Without this, V1 stays
-                        // black/stale until the decoder catches up
-                        // and the user sees V2 "fade to a still frame"
-                        // because the secondary is empty.
-                        let preWarmStart = max(0, startT - Self.transitionPreWarmLead)
-                        let visibleEnd = clipEnd + (underlying != nil ? Self.transitionHandoverTail : 0)
-                        if t >= preWarmStart, t <= visibleEnd, dur > 0 {
-                            let inPreWarm = t < startT
-                            let inTail = t > clipEnd
-                            let rawProgress: Double
-                            let secOpacity: Double
-                            if inPreWarm {
-                                rawProgress = 0
-                                secOpacity = 0
-                            } else if inTail {
-                                rawProgress = 1
-                                secOpacity = 1
-                            } else {
-                                rawProgress = (t - startT) / dur
-                                secOpacity = rawProgress
-                            }
-                            let edge = ClipEdgeSelection(
-                                clipID: clip.id, trackKind: 0,
-                                trackIndex: videoTrackIdx, side: .right
-                            )
-                            if let underlying = underlying {
-                                // Primary stays on the fading clip
-                                // during pre-warm + the visible fade-
-                                // out, then pre-swaps to the underlying
-                                // during the tail. Secondary holds the
-                                // underlying throughout so its decoder
-                                // is primed by the time it becomes
-                                // visible.
-                                let primaryClip: PlacedClip = inTail ? underlying.0 : clip
-                                let primarySource: ClipSource = inTail ? underlying.1 : source
-                                // During pre-warm, hold the secondary
-                                // at the underlying's frame that the
-                                // playhead WILL reach at fade-out
-                                // start — so PPE seeks once and stays
-                                // put while its decoder fills, instead
-                                // of racing 1× forward to catch up.
-                                let secondaryHold: Double? = inPreWarm
-                                    ? underlying.0.sourceRange.start.seconds
-                                        + (startT - underlying.0.timelineRange.start.seconds)
-                                    : nil
-                                return ActiveTransition(
-                                    mode: .fadeOut,
-                                    primaryClip: primaryClip, primarySource: primarySource,
-                                    secondaryClip: underlying.0, secondarySource: underlying.1,
-                                    primaryOpacity: 1.0,
-                                    secondaryOpacity: secOpacity,
-                                    progress: rawProgress,
-                                    inHandoverTail: inTail,
-                                    cutContext: nil, edgeContext: edge,
-                                    secondaryHoldSourceTime: secondaryHold
-                                )
-                            }
-                            guard !inPreWarm else { continue }
-                            return ActiveTransition(
-                                mode: .fadeOut,
-                                primaryClip: clip, primarySource: source,
-                                secondaryClip: nil, secondarySource: nil,
-                                primaryOpacity: 1.0 - rawProgress,
-                                secondaryOpacity: 0,
-                                progress: rawProgress,
-                                inHandoverTail: false,
-                                cutContext: nil, edgeContext: edge,
-                                secondaryHoldSourceTime: nil
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        return nil
-    }
-
-    /// Find the topmost clip on a track BELOW `aboveTrackIndex` that
-    /// contains the playhead. Used by solo fades to determine what's
-    /// "underneath" the fading clip so it can blend against the real
-    /// backdrop instead of black.
-    private func underlyingVideoClipAndSource(
-        at seconds: Double,
-        aboveTrackIndex: Int,
-        in sequence: Sequence
-    ) -> (PlacedClip, ClipSource)? {
-        guard aboveTrackIndex > 0 else { return nil }
-        let probe = RationalTime(value: Int64(seconds * 1000), scale: 1000)
-        // Iterate from the immediate lower track downward — pick the
-        // first clip that contains the playhead.
-        for lower in (0..<aboveTrackIndex).reversed() {
-            let track = sequence.videoTracks[lower]
-            if let placed = track.clips.first(where: { $0.timelineRange.contains(probe) }),
-               let src = project.mediaPool.clips[placed.sourceClipID] {
-                return (placed, src)
-            }
-        }
-        return nil
     }
 
     /// Add (or replace) a cross-dissolve transition at every abutting
