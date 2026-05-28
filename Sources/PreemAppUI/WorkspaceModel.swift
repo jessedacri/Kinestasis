@@ -273,28 +273,36 @@ public final class WorkspaceModel: ObservableObject {
         previewCache.clear()
     }
 
-    public func save() {
+    /// `completion` reports whether the project is saved when the call
+    /// settles — including the async Save-As panel. Callers that gate on
+    /// the result (e.g. quit-with-unsaved-changes) must use it rather
+    /// than polling `isDirty`, which is still true while the panel is up.
+    public func save(completion: ((Bool) -> Void)? = nil) {
         if let url = currentProjectURL {
             performSave(to: url)
+            completion?(!isDirty)
         } else {
-            saveAs()
+            saveAs(completion: completion)
         }
     }
 
-    public func saveAs() {
+    public func saveAs(completion: ((Bool) -> Void)? = nil) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: ProjectStore.fileExtension) ?? .data]
         panel.nameFieldStringValue = project.name + ".\(ProjectStore.fileExtension)"
         panel.title = "Save Preem Project"
         panel.begin { [weak self] response in
-            guard let self, response == .OK, let url = panel.url else { return }
+            guard let self, response == .OK, let url = panel.url else {
+                completion?(false)
+                return
+            }
             // Set the name BEFORE saving so the file contents persist
             // it. Previously the name was set after performSave, so
             // every Save-As produced an "Untitled" file on disk and
             // every subsequent Open showed the wrong window title.
             project.name = url.deletingPathExtension().lastPathComponent
             performSave(to: url)
-            currentProjectURL = url
+            completion?(!isDirty)
         }
     }
 
@@ -2763,6 +2771,35 @@ public final class WorkspaceModel: ObservableObject {
         }
     }
 
+    /// Light variant of `setTransformParameterOnSelection` for use DURING
+    /// a slider drag: mutates the sequence and drives the viewer, but
+    /// skips undo, audio, and pre-render cache invalidation. Bracket the
+    /// drag with `beginUndoBatch()` / (`endUndoBatch()` + `commitTransformEdits()`).
+    public func setTransformParameterOnSelectionLight(
+        _ parameter: TransformParameter,
+        _ value: Double
+    ) {
+        guard let idx = project.sequences.firstIndex(where: { $0.id == activeSequenceID }) else { return }
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        var sequence = project.sequences[idx]
+        for id in ids {
+            let localT = clipLocalSecondsAtPlayhead(id, in: sequence)
+            updatePlacedClip(id, in: &sequence) { clip in
+                clip.setParameter(parameter, value: value, at: localT)
+            }
+        }
+        project.sequences[idx] = sequence
+    }
+
+    /// Flush the invalidation a light-edit drag skipped: one pre-render
+    /// cache clear + dirty mark. Transform edits don't affect audio.
+    public func commitTransformEdits() {
+        guard let sequence = activeSequence else { return }
+        markDirty()
+        invalidatePreRenderCache(for: sequence.id)
+    }
+
     /// Toggle keyframing for one Transform/Crop parameter on the clip.
     /// Going ON converts the constant value into a single keyframe at
     /// the playhead; going OFF collapses to a constant at the value
@@ -2921,27 +2958,45 @@ public final class WorkspaceModel: ObservableObject {
         let localT = clipLocalSecondsAtPlayhead(id)
         updateSequence { sequence in
             updatePlacedClip(id, in: &sequence) { clip in
-                clip.setParameter(.positionX,  value: transform.positionX,       at: localT)
-                clip.setParameter(.positionY,  value: transform.positionY,       at: localT)
-                clip.setParameter(.scaleX,     value: transform.scaleX,          at: localT)
-                clip.setParameter(.scaleY,     value: transform.scaleY,          at: localT)
-                clip.setParameter(.opacity,    value: transform.opacity,         at: localT)
-                clip.setParameter(.rotation,   value: transform.rotationDegrees, at: localT)
-                clip.setParameter(.cropTop,     value: transform.cropTop,         at: localT)
-                clip.setParameter(.cropRight,   value: transform.cropRight,       at: localT)
-                clip.setParameter(.cropBottom,  value: transform.cropBottom,      at: localT)
-                clip.setParameter(.cropLeft,    value: transform.cropLeft,        at: localT)
-                clip.setParameter(.cropFeather, value: transform.cropFeather,     at: localT)
-
-                // stretchToFill is not keyframable.
-                var i = clip.effects.firstIndex { $0.effectKey == "preem.transform" }
-                if i == nil {
-                    clip.effects.append(EffectInstance(effectKey: "preem.transform", parameters: [:]))
-                    i = clip.effects.count - 1
-                }
-                clip.effects[i!].parameters["stretchToFill"] = .bool(transform.stretchToFill)
+                Self.applyTransform(transform, to: &clip, at: localT)
             }
         }
+    }
+
+    /// Light variant for on-canvas direct manipulation: drives the
+    /// viewer but skips undo / audio / pre-render invalidation. Bracket
+    /// the drag with `beginUndoBatch()` / (`endUndoBatch()` +
+    /// `commitTransformEdits()`).
+    public func setClipTransformLight(_ id: PlacedClipID, _ transform: ClipTransform) {
+        guard let idx = project.sequences.firstIndex(where: { $0.id == activeSequenceID }) else { return }
+        let localT = clipLocalSecondsAtPlayhead(id)
+        var sequence = project.sequences[idx]
+        updatePlacedClip(id, in: &sequence) { clip in
+            Self.applyTransform(transform, to: &clip, at: localT)
+        }
+        project.sequences[idx] = sequence
+    }
+
+    private static func applyTransform(_ transform: ClipTransform, to clip: inout PlacedClip, at localT: Double?) {
+        clip.setParameter(.positionX,  value: transform.positionX,       at: localT)
+        clip.setParameter(.positionY,  value: transform.positionY,       at: localT)
+        clip.setParameter(.scaleX,     value: transform.scaleX,          at: localT)
+        clip.setParameter(.scaleY,     value: transform.scaleY,          at: localT)
+        clip.setParameter(.opacity,    value: transform.opacity,         at: localT)
+        clip.setParameter(.rotation,   value: transform.rotationDegrees, at: localT)
+        clip.setParameter(.cropTop,     value: transform.cropTop,         at: localT)
+        clip.setParameter(.cropRight,   value: transform.cropRight,       at: localT)
+        clip.setParameter(.cropBottom,  value: transform.cropBottom,      at: localT)
+        clip.setParameter(.cropLeft,    value: transform.cropLeft,        at: localT)
+        clip.setParameter(.cropFeather, value: transform.cropFeather,     at: localT)
+
+        // stretchToFill is not keyframable.
+        var i = clip.effects.firstIndex { $0.effectKey == "preem.transform" }
+        if i == nil {
+            clip.effects.append(EffectInstance(effectKey: "preem.transform", parameters: [:]))
+            i = clip.effects.count - 1
+        }
+        clip.effects[i!].parameters["stretchToFill"] = .bool(transform.stretchToFill)
     }
 
     /// Convenience: set the transform on every selected clip at once.

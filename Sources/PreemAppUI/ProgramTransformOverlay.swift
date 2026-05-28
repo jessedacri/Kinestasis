@@ -3,15 +3,8 @@ import AppKit
 import PreemCore
 
 /// Bounding-box + handle overlay drawn over the realtime program
-/// viewer when a clip is selected. Lets the user move / scale clips
-/// directly in the picture, Premiere-style.
-///
-/// v1 surfaces:
-/// - Center drag → move (updates `positionX`/`positionY`)
-/// - Corner drag → uniform scale (updates `scaleX`/`scaleY` together)
-///
-/// Per-edge scale + rotation grips ride in the next pass — they want
-/// the same gesture machinery but with axis-specific math.
+/// viewer when a clip is selected: center drag moves, corner handles
+/// scale uniformly, edge handles scale one axis, the top grip rotates.
 struct ProgramTransformOverlay: View {
     @ObservedObject var workspace: WorkspaceModel
 
@@ -205,11 +198,12 @@ private struct TransformHandles: View {
                 var t = start
                 t.positionX = start.positionX + Double(dx)
                 t.positionY = start.positionY + Double(dy)
-                workspace.setClipTransform(placedClip.id, t)
+                workspace.setClipTransformLight(placedClip.id, t)
             }
             .onEnded { _ in
                 dragStartTransform = nil
                 workspace.endUndoBatch()
+                workspace.commitTransformEdits()
             }
     }
 
@@ -268,11 +262,12 @@ private struct TransformHandles: View {
                 var t = start
                 t.scaleX = max(0.05, start.scaleX * Double(ratio))
                 t.scaleY = max(0.05, start.scaleY * Double(ratio))
-                workspace.setClipTransform(placedClip.id, t)
+                workspace.setClipTransformLight(placedClip.id, t)
             }
             .onEnded { _ in
                 dragStartTransform = nil
                 workspace.endUndoBatch()
+                workspace.commitTransformEdits()
             }
     }
 
@@ -329,11 +324,12 @@ private struct TransformHandles: View {
                     let ratio = nowD / startD
                     t.scaleY = max(0.05, start.scaleY * Double(ratio))
                 }
-                workspace.setClipTransform(placedClip.id, t)
+                workspace.setClipTransformLight(placedClip.id, t)
             }
             .onEnded { _ in
                 dragStartTransform = nil
                 workspace.endUndoBatch()
+                workspace.commitTransformEdits()
             }
     }
 
@@ -394,13 +390,14 @@ private struct TransformHandles: View {
                 while delta > 180 { delta -= 360 }
                 while delta < -180 { delta += 360 }
                 let newAngle = startRot + delta
-                workspace.setTransformParameterOnSelection(.rotation, newAngle)
+                workspace.setTransformParameterOnSelectionLight(.rotation, newAngle)
             }
             .onEnded { _ in
                 dragStartTransform = nil
                 dragStartRotationAngle = nil
                 dragStartCursorAngle = nil
                 workspace.endUndoBatch()
+                workspace.commitTransformEdits()
             }
     }
 }

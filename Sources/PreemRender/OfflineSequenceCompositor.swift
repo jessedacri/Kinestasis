@@ -185,6 +185,22 @@ public final class OfflineSequenceCompositor {
         lastDeliveredFrame.removeAll()
     }
 
+    /// Drop cached decoders/frames for sources no longer referenced by
+    /// the current sequence, so a long editing session doesn't retain a
+    /// decoder + held CVPixelBuffer per clip ever placed.
+    public func pruneUnusedSources() {
+        guard !frameSources.isEmpty else { return }
+        var live = Set<ClipID>()
+        for track in sequence.videoTracks { for c in track.clips { live.insert(c.sourceClipID) } }
+        for track in sequence.audioTracks { for c in track.clips { live.insert(c.sourceClipID) } }
+        for id in frameSources.keys where !live.contains(id) {
+            frameSources[id]?.tearDown()
+            frameSources.removeValue(forKey: id)
+            lastSourceTime.removeValue(forKey: id)
+            lastDeliveredFrame.removeValue(forKey: id)
+        }
+    }
+
     deinit {
         for fs in frameSources.values { fs.tearDown() }
     }

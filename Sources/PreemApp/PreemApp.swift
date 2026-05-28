@@ -140,16 +140,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let response = alert.runModal()
         switch response {
         case .alertFirstButtonReturn:   // Save
-            workspace.save()
             // Save may be async (NSSavePanel for untitled projects).
-            // Re-check on the next runloop tick; if still dirty (user
-            // cancelled the panel), abort quit.
-            DispatchQueue.main.async {
-                if workspace.isDirty {
-                    NSApp.reply(toApplicationShouldTerminate: false)
-                } else {
-                    NSApp.reply(toApplicationShouldTerminate: true)
-                }
+            // Quit only once the save actually settles; if it failed or
+            // the user cancelled the panel, abort the quit.
+            workspace.save { saved in
+                NSApp.reply(toApplicationShouldTerminate: saved)
             }
             return .terminateLater
         case .alertSecondButtonReturn:  // Cancel

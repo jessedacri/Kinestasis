@@ -2379,9 +2379,14 @@ public final class PreemTimelineView: NSView {
     public override func scrollWheel(with event: NSEvent) {
         scrollOffsetSeconds = max(0, scrollOffsetSeconds - Double(event.scrollingDeltaX) / pixelsPerSecond)
         if event.modifierFlags.contains(.command) {
-            // Cmd-scroll = zoom
+            // Cmd-scroll = zoom. Route through the same callback + bounds
+            // as pinch-zoom so the workspace and the zoom slider stay in sync.
             let factor = 1.0 + Double(event.scrollingDeltaY) * 0.005
-            pixelsPerSecond = max(2, min(2000, pixelsPerSecond * factor))
+            let target = max(Self.minPixelsPerSecond,
+                             min(Self.maxPixelsPerSecond, pixelsPerSecond * factor))
+            if target != pixelsPerSecond {
+                callbacks.setPixelsPerSecond?(target)
+            }
         }
         needsDisplay = true
     }

@@ -74,9 +74,11 @@ struct EffectControlsContent: View {
 
     /// Single-source read of the current transform — re-runs every time
     /// the workspace publishes (playhead, undo, direct-manipulation).
+    /// Reads from `leadClipID` so the sliders and the keyframe strip
+    /// always describe the same clip (a `Set.first` over the raw
+    /// selection could pick a linked audio sibling instead).
     private var currentTransform: ClipTransform {
-        if let first = workspace.selectedClipIDs.first,
-           let t = workspace.clipTransform(first) {
+        if let id = leadClipID, let t = workspace.clipTransform(id) {
             return t
         }
         return .identity
@@ -161,6 +163,23 @@ struct EffectControlsContent: View {
         }
     }
 
+    // Shared read-only formatters — these views re-render on every
+    // playhead tick during playback, so don't allocate one per body.
+    private static let fraction2Formatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 0
+        f.maximumFractionDigits = 2
+        return f
+    }()
+    private static let fraction4Formatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 0
+        f.maximumFractionDigits = 4
+        return f
+    }()
+
     /// Numeric field that displays a value as a percentage. Underlying
     /// param is a multiplier (1.0 = 100%). If `link` is provided, the
     /// linked param is scaled by the same ratio to keep uniform scale.
@@ -170,13 +189,7 @@ struct EffectControlsContent: View {
         link: TransformParameter?,
         range: ClosedRange<Double>
     ) -> some View {
-        let fmt: NumberFormatter = {
-            let f = NumberFormatter()
-            f.numberStyle = .decimal
-            f.minimumFractionDigits = 0
-            f.maximumFractionDigits = 2
-            return f
-        }()
+        let fmt = Self.fraction2Formatter
         let bind = Binding<Double>(
             get: { currentValue(parameter) * 100 },
             set: { percent in
@@ -217,9 +230,13 @@ struct EffectControlsContent: View {
                 ThinSlider(
                     value: Binding(
                         get: { currentValue(.rotation) },
-                        set: { workspace.setTransformParameterOnSelection(.rotation, $0) }
+                        set: { workspace.setTransformParameterOnSelectionLight(.rotation, $0) }
                     ),
-                    range: -180...180
+                    range: -180...180,
+                    onEditingChanged: { editing in
+                        if editing { workspace.beginUndoBatch() }
+                        else { workspace.endUndoBatch(); workspace.commitTransformEdits() }
+                    }
                 )
                 HStack(spacing: 2) {
                     rotationField
@@ -241,15 +258,7 @@ struct EffectControlsContent: View {
     }
 
     private var rotationField: some View {
-        let fmt: NumberFormatter = {
-            let f = NumberFormatter()
-            f.numberStyle = .decimal
-            f.minimumFractionDigits = 0
-            f.maximumFractionDigits = 2
-            // Accept negative and positive numbers, and bare "0".
-            f.allowsFloats = true
-            return f
-        }()
+        let fmt = Self.fraction2Formatter
         let bind = Binding<Double>(
             get: { currentValue(.rotation) },
             set: { newVal in
@@ -305,7 +314,6 @@ struct EffectControlsContent: View {
         label: String,
         parameter: TransformParameter,
         in range: ClosedRange<Double>,
-        percent: Bool = false,
         @ViewBuilder trailing: (Double) -> Trailing
     ) -> some View {
         row(label: label, stopwatch: { stopwatchButton(active: paramKeyed(parameter)) { workspace.toggleKeyframingOnSelection(parameter) } }) {
@@ -313,9 +321,13 @@ struct EffectControlsContent: View {
                 ThinSlider(
                     value: Binding(
                         get: { currentValue(parameter) },
-                        set: { newVal in workspace.setTransformParameterOnSelection(parameter, newVal) }
+                        set: { newVal in workspace.setTransformParameterOnSelectionLight(parameter, newVal) }
                     ),
-                    range: range
+                    range: range,
+                    onEditingChanged: { editing in
+                        if editing { workspace.beginUndoBatch() }
+                        else { workspace.endUndoBatch(); workspace.commitTransformEdits() }
+                    }
                 )
                 trailing(currentValue(parameter))
             }
@@ -329,7 +341,7 @@ struct EffectControlsContent: View {
         in range: ClosedRange<Double>,
         percent: Bool = false
     ) -> some View {
-        paramSlider(label: label, parameter: parameter, in: range, percent: percent) { v in
+        paramSlider(label: label, parameter: parameter, in: range) { v in
             Text(percent ? String(format: "%.1f%%", v * 100) : String(format: "%.3f", v))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -346,13 +358,7 @@ struct EffectControlsContent: View {
         step: Double,
         range: ClosedRange<Double>? = nil
     ) -> some View {
-        let fmt: NumberFormatter = {
-            let f = NumberFormatter()
-            f.numberStyle = .decimal
-            f.minimumFractionDigits = 0
-            f.maximumFractionDigits = 4
-            return f
-        }()
+        let fmt = Self.fraction4Formatter
         let bind = Binding<Double>(
             get: { currentValue(parameter) },
             set: { newValue in

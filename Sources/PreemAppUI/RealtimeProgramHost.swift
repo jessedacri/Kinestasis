@@ -69,6 +69,9 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
         // playing across the same cached range doesn't reopen.
         private var cacheReader: CacheFrameReader?
         private var lastCacheURL: URL?
+        // Cheap signal for "the set of clips changed" — gates source
+        // pruning so steady-state playback allocates nothing per tick.
+        private var lastClipCount = -1
 
         // True when a compose+present task is mid-flight. If the
         // display link fires another tick before the previous finishes,
@@ -183,6 +186,10 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             let started = Date()
 
             Task.detached(priority: .userInitiated) { [weak self] in
+                // Always release the single-flight gate, even if compose
+                // throws or the task unwinds early — otherwise the viewer
+                // freezes permanently.
+                defer { self?.inFlight = false }
                 // Compose into the drawable's texture. Either via cache
                 // fast-path (blit) or via the compositor. Both run off
                 // the main actor.
@@ -207,9 +214,7 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                 // Bookkeeping — bump back to main actor only for the
                 // small state writes.
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.noteDuration(started: started)
-                    self.inFlight = false
+                    self?.noteDuration(started: started)
                 }
             }
         }
@@ -275,6 +280,7 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                     outputHeight: spec.height
                 )
                 compositorSpec = spec
+                lastClipCount = -1
             } else {
                 // Same sequence spec, but the sequence/mediaPool structs
                 // may have mutated (transform edits, clip moves, etc.).
@@ -284,6 +290,15 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                 // currently reading these fields.
                 compositor?.sequence = sequence
                 compositor?.mediaPool = workspace.project.mediaPool
+            }
+            // Evict decoders for removed clips, but only when the clip
+            // count actually changed — keeps the hot path allocation-free.
+            var clipCount = 0
+            for track in sequence.videoTracks { clipCount += track.clips.count }
+            for track in sequence.audioTracks { clipCount += track.clips.count }
+            if clipCount != lastClipCount {
+                compositor?.pruneUnusedSources()
+                lastClipCount = clipCount
             }
         }
     }

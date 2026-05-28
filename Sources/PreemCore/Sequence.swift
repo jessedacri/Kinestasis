@@ -232,9 +232,11 @@ public enum Interpolation: String, Codable, Sendable {
     case hold
     /// Straight line A → B.
     case linear
-    /// Cubic ease with slow start, full speed at B (decelerating into B).
+    /// Flat tangent on the IN side: motion decelerates as it arrives at
+    /// this keyframe (the segment ending here "eases in").
     case easeIn
-    /// Cubic ease with full speed at A, slow finish at B (decelerating into B).
+    /// Flat tangent on the OUT side: motion accelerates slowly as it
+    /// leaves this keyframe (the segment starting here "eases out").
     case easeOut
     /// Cubic ease with slow start AND slow finish — smoothstep S-curve.
     /// Stored as `bezier` for backward compat with already-saved projects.

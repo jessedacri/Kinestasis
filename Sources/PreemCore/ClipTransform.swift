@@ -151,7 +151,17 @@ public func sampleDouble(_ value: ParameterValue?, at clipLocalSeconds: Double, 
         return v
     case .keyframed(let kfs):
         guard !kfs.isEmpty else { return defaultValue }
-        let sorted = kfs.sorted { $0.time.seconds < $1.time.seconds }
+        // Writers keep keyframes sorted by time; only re-sort (and
+        // allocate) if that invariant is violated — e.g. a hand-edited
+        // project file. Steady-state sampling is allocation-free.
+        var isSorted = true
+        if kfs.count > 1 {
+            for k in 1..<kfs.count where kfs[k].time.seconds < kfs[k - 1].time.seconds {
+                isSorted = false
+                break
+            }
+        }
+        let sorted = isSorted ? kfs : kfs.sorted { $0.time.seconds < $1.time.seconds }
         if clipLocalSeconds <= sorted.first!.time.seconds {
             if case .double(let v) = sorted.first!.value { return v }
             return defaultValue
@@ -307,7 +317,7 @@ public extension PlacedClip {
                 updated[j].value = .double(value)
             } else {
                 let kf = Keyframe(
-                    time: RationalTime(value: Int64(t * 1000), scale: 1000),
+                    time: RationalTime(value: Int64((t * 1000).rounded()), scale: 1000),
                     value: .double(value),
                     interpolation: .linear
                 )
@@ -349,7 +359,7 @@ public extension PlacedClip {
             let v: Double
             if case .double(let dv) = existing { v = dv } else { v = parameter.defaultValue }
             let kf = Keyframe(
-                time: RationalTime(value: Int64(clipLocalTime * 1000), scale: 1000),
+                time: RationalTime(value: Int64((clipLocalTime * 1000).rounded()), scale: 1000),
                 value: .double(v),
                 interpolation: .linear
             )
@@ -431,10 +441,15 @@ public extension PlacedClip {
         }) else { return }
         guard abs(kfs[idxToMove].time.seconds - fromClipLocalTime) <= tolerance else { return }
 
+        let newTime = RationalTime(value: Int64((toClipLocalTime * 1000).rounded()), scale: 1000)
+        var moved = kfs[idxToMove]
+        moved.time = newTime
         var updated = kfs
-        updated[idxToMove].time = RationalTime(
-            value: Int64(toClipLocalTime * 1000), scale: 1000
-        )
+        updated.remove(at: idxToMove)
+        // Drop any keyframe the move would land on top of, so retiming
+        // can't leave two keyframes at the same time.
+        updated.removeAll { abs($0.time.seconds - newTime.seconds) < 0.001 }
+        updated.append(moved)
         updated.sort { $0.time.seconds < $1.time.seconds }
         effects[i].parameters[name] = .keyframed(updated)
     }
