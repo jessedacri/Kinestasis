@@ -245,6 +245,11 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                         queue: queue,
                         compositor: cmp
                     )
+                    drawable.present()
+                    // Warm the live decoder AFTER presenting the cache
+                    // frame, so the prewarm seek never delays the visible
+                    // frame. Only ticks while the prewarm runs are skipped
+                    // (the cache frame is already on screen).
                     if let cmp, let prewarmTime {
                         await cmp.prewarm(at: prewarmTime)
                     }
@@ -254,8 +259,10 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                     } catch {
                         PreemDebugLog.log("[Realtime] composeAsync failed: \(error.localizedDescription)")
                     }
+                    drawable.present()
+                } else {
+                    drawable.present()
                 }
-                drawable.present()
 
                 // Bookkeeping — bump back to main actor only for the
                 // small state writes.
