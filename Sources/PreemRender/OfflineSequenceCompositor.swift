@@ -841,7 +841,15 @@ public final class OfflineSequenceCompositor {
 
     private func pullFrame(source: ClipSource, atSourceTime t: Double) async throws -> CVPixelBuffer {
         let key = source.id
-        let target = CMTime(seconds: t, preferredTimescale: 600)
+        // Nudge the sample point a few ms INTO the frame interval. When a
+        // clip's source-in equals its timeline-in (a contiguous blade),
+        // the frame-quantized compose time lands exactly on source frame
+        // boundaries, where the [pts, pts+dur) window test is fragile to
+        // cross-timescale rounding and intermittently grabs the adjacent
+        // frame — a steady stream of 1-frame skips that reads as chop.
+        // A sub-frame epsilon keeps selection robustly inside one frame
+        // without ever changing which frame it is.
+        let target = CMTime(seconds: max(0, t) + 0.004, preferredTimescale: 600)
 
         // Cache hit: target lies inside the last delivered frame's
         // presentation window → re-use without touching the source.
