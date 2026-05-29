@@ -62,15 +62,32 @@ Order:
 5. `ROADMAP.md` — what's in M1 → M6+.
 6. `APPLE-SILICON.md` — which Apple API for which job, and why.
 
-## What I'd do next (recommended order)
+## NEXT SESSION — Bins, "selects," and FCP-style skimming (user's priority)
 
-1. **Multi-track audio export** — clips with multi-cam camera audio still collapse to one stream on export. Needs: `ClipAudioLoader` rewrite on `AVAssetReader` with one output per source `AVAssetTrack` (current `AVAudioFile` path collapses to one stream); per-track `AVAssetWriterInput` in `SequenceEncoder`; `ExportSettings.audio.tracksMode = .mixdown | .preserveSource`.
-2. **Bezier handles for keyframes** — today `.bezier` / `.easeIn` / `.easeOut` use cubic Hermite with fixed zero tangents at the eased ends. After Effects–style draggable Bezier handles would need: schema additions (`Keyframe.inHandle`, `Keyframe.outHandle`), updated `sampleDouble`, and per-handle drag UI in the strip.
-3. **Rotated chrome in the program viewer overlay.** The bounding box + handles stay axis-aligned today (AABB of the rotated picture). Rotating the chrome to follow the picture requires applying inverse rotation to cursor deltas in the corner/edge gesture math — `ProgramTransformOverlay.cornerScaleGesture` and friends.
-4. **Customizable keymap presets** — `PreemSettings`-backed save/load for the keymap. User flagged this when the V/B/A keymap landed.
-5. **Proxy pipeline** — ProRes 422 LT background transcode on import for heavy source codecs. Realtime drop chip already prompts the user; proxies are the next-level fix.
-6. **`.preem` package format** — currently a flat JSON file. Waveform / thumbnail / proxy caches will want to live inside the project bundle. Pre-render cache lives at `~/Library/Caches/Preem/projects/<id>/prerender/` and survives renames; not urgent.
-7. **Render-graph fusion** — multiple `effects` on a clip iterate one Metal pass each. Fusing into one pass per layer would matter as the effect arsenal grows.
+The next focus is bin behavior and the **selects** workflow, moving toward Final Cut Pro: **skim** a clip by moving the mouse across its row/thumbnail in the bin and see it live in the Source viewer (no click, no play), plus mark/rate "selects" and pull them.
+
+**Good news — the render pipeline already supports frame seeks**, so skimming is mostly a bin-side gesture that writes the source playhead. Data flow that already works:
+`workspace.sourceTimeSeconds` (published) → `ViewerPane` re-render → `SourcePPEHost.updateNSView` → `Coordinator.push(clip:sourceTimeSeconds:isPlaying:)` → `CustomVideoPlayer.update(secondsInVideo:)` → decoder seeks → renderer pulls the frame. So setting `sourceClip` + `sourceTimeSeconds` during hover renders that frame automatically.
+
+**Concrete plan:**
+1. **Skim gesture in the bin.** `ClipRow` (`BinBrowserView.swift:143`) has click/drag but no hover. Add a `GeometryReader` + continuous-hover (NSTrackingArea via an `NSViewRepresentable`, or SwiftUI `.onContinuousHover`) to map cursor-x → fraction → `sourceTime = frac * clip.duration`. On hover: set `workspace.sourceClip = clip` (if not already) and `workspace.sourceTimeSeconds = sourceTime`. On hover-exit: optionally restore the clicked clip's position. Throttle/coalesce if mouseMoved floods (it fires ~5–10ms).
+   - FCP detail to decide: skimming should preview WITHOUT committing the selection (or commit a "skimmed" clip distinct from the "opened" clip). Consider a separate `skimClip`/`skimTime` vs the persistent `sourceClip` so leaving the bin restores what was open.
+   - Audio: FCP plays "skimming audio." Optional v2 — start muted (video-only skim) to avoid audio-engine thrash on every pixel.
+2. **Selects / ratings — needs a data-model addition.** `ClipSource` (`MediaPool.swift:28`) has NO rating/favorite/keyword fields. Add e.g. `rating: Int` (0=none, +1 favorite, -1 reject — FCP uses favorite/reject ranges) and/or `keywords: [String]`, persist in the project JSON (Codable, give defaults for back-compat with old files — mirror how `Interpolation.easeIn/easeOut` were added). Then: bin UI to set favorite/reject (F / Delete keys in FCP), filter the bin by rating, and "pull selects" = a filtered view or a smart collection.
+3. **Bin behavior toward FCP:** marked In/Out on a skimmed/source clip already feed `insertFromSource` / `overwriteFromSource` (`WorkspaceModel.swift:1394`). Consider FCP's "favorites as sub-ranges" later; start with whole-clip ratings.
+
+Key files for this work: `BinBrowserView.swift` (rows, gestures, `orderedClips` at ~:107), `ViewerPane.swift` (Source pane + `ScrubBar` + `SourcePPEHost` at :309), `WorkspaceModel.swift` (`sourceClip` :16, `sourceTimeSeconds` :75, source marks :76–77, `nudgeSourcePlayhead` :1363, `setSourceIn/Out` :1373), `CustomVideoPlayer.swift` (`update(secondsInVideo:)` :177 — the seek entry point), `PreemCore/MediaPool.swift` (`ClipSource` :28 — add rating fields here).
+
+## Other backlog (recommended order)
+
+1. **Cache↔live boundary micro-hiccup** — see "Known follow-ups" below (a tightening pass on the playback engine).
+2. **Multi-track audio export** — clips with multi-cam camera audio still collapse to one stream on export. Needs: `ClipAudioLoader` rewrite on `AVAssetReader` with one output per source `AVAssetTrack` (current `AVAudioFile` path collapses to one stream); per-track `AVAssetWriterInput` in `SequenceEncoder`; `ExportSettings.audio.tracksMode = .mixdown | .preserveSource`.
+3. **Proxy pipeline** — ProRes 422 LT background transcode on import for heavy source codecs (e.g. the 4K H.264 in the test project). Realtime drop chip already prompts the user; proxies are the next-level fix and pair naturally with the bin/skim work (skimming 4K H.264 is decode-heavy).
+4. **Bezier handles for keyframes** — today `.bezier` / `.easeIn` / `.easeOut` use cubic Hermite with fixed zero tangents at the eased ends. After Effects–style draggable Bezier handles would need: schema additions (`Keyframe.inHandle`, `Keyframe.outHandle`), updated `sampleDouble`, and per-handle drag UI in the strip.
+5. **Rotated chrome in the program viewer overlay.** The bounding box + handles stay axis-aligned today (AABB of the rotated picture). Rotating the chrome to follow the picture requires applying inverse rotation to cursor deltas in the corner/edge gesture math — `ProgramTransformOverlay.cornerScaleGesture` and friends.
+6. **Customizable keymap presets** — `PreemSettings`-backed save/load for the keymap. User flagged this when the V/B/A keymap landed.
+7. **`.preem` package format** — currently a flat JSON file. Waveform / thumbnail / proxy caches will want to live inside the project bundle. Pre-render cache lives at `~/Library/Caches/Preem/projects/<id>/prerender/` and survives renames; not urgent.
+8. **Render-graph fusion** — multiple `effects` on a clip iterate one Metal pass each. Fusing into one pass per layer would matter as the effect arsenal grows.
 
 ## Playback choppiness — SOLVED (2026-05-28 → 2026-05-29)
 
@@ -179,6 +196,13 @@ Media is streamed, not RAM-resident: each source clip is decoded on demand throu
 **Audio:**
 - `PreemAppUI/TimelineAudioPipeline.swift`, `PreemAppUI/SourceAudioPipeline.swift`.
 
+**Bin + Source viewer (next session's area):**
+- `PreemAppUI/BinBrowserView.swift` — bin list; `ClipRow` (~:143) renders a clip and has tap-to-open + drag-to-timeline but NO hover/skim yet; `orderedClips` (~:107). Skim gesture goes here.
+- `PreemAppUI/ViewerPane.swift` — Source pane: `ScrubBar` (~:167), `SourcePPEHost` (~:309) wrapping PPE; the source viewer renders whatever `(sourceClip, sourceTimeSeconds)` say.
+- `PolymergePlayback/PPE/CustomVideoPlayer.swift` — `update(secondsInVideo:…)` (~:177) is the source seek entry point; renderer pulls the frame.
+- Source state in `WorkspaceModel`: `sourceClip` (:16), `sourceTimeSeconds` (:75), `sourceInMark`/`sourceOutMark` (:76–77), `nudgeSourcePlayhead` (:1363), `setSourceIn/Out` (:1373), `insertFromSource`/`overwriteFromSource` (:1394).
+- `PreemCore/MediaPool.swift` `ClipSource` (:28) — add rating/favorite/keyword fields here for "selects" (none exist yet; Codable with defaults for back-compat).
+
 **Workspace + brain:**
 - `PreemAppUI/WorkspaceModel.swift` — ~3500 lines, well-sectioned. Read top-to-bottom once. `selectedVideoClipIDs`, `setTransformParameterOnSelection`, `moveKeyframeLight`, `setKeyframeInterpolation`, `findPlacedClip` are the keyframe-era additions.
 - `PreemAppUI/PreemAppUI.swift` — root view, key monitor (Delete now removes selected cut / edge too), focus border, callback wiring.
@@ -193,10 +217,11 @@ Media is streamed, not RAM-resident: each source clip is decoded on demand throu
 
 ## State pointer
 
-- **App version**: M2 complete + most of M3 shipped. Remaining: multi-track audio mux on export, bezier handles, proxy pipeline, render-graph fusion, customizable keymap presets, `.preem` package format.
+- **App version**: M2 complete + most of M3 shipped. Playback engine hardened across 2026-05-28/29 (see playback sections above). **Next session: bins / selects / FCP-style skimming** (top section). Remaining backlog: cache↔live boundary micro-hiccup (tightening), multi-track audio export, proxy pipeline, bezier handles, rotated overlay chrome, keymap presets, `.preem` package, render-graph fusion.
+- **Git**: `main` holds everything. Worktree clean. Repo created 2026-05-28; `themarket.mp4` gitignored (large test footage).
 - **Polymerge**: forked in-tree on 2026-05-27. No external dep.
-- **Debug log**: `/tmp/preem-debug.log`. `PreemDebugLog.log(...)` wired into critical paths. Check it first when something behaves weird. Encoder heartbeat is `[Encoder] video N/M audio M/X @ Y fps`.
-- **Build**: `swift build -c release && swift run -c release Preem` for any real footage work.
-- **Open mystery**: overnight playback choppiness (see section above). Add telemetry if it reproduces.
+- **Debug log**: `/tmp/preem-debug.log`. `PreemDebugLog.log(...)` wired into critical paths. Check it first when something behaves weird. Encoder heartbeat is `[Encoder] video N/M audio M/X @ Y fps`. (All the temporary playback telemetry from the 05-29 hunt has been removed.)
+- **Build**: `swift build -c release && swift run -c release Preem` for any real footage work. 27 unit tests (`swift test`), all passing.
+- **Playback chop**: SOLVED (frame-boundary source sampling + WYSIWYG decoupling). One known polish item left: the cache↔live boundary micro-hiccup.
 
 Good luck. If something feels weird, check the debug log, then re-read `TIMELINE.md` (editing question) or `COMPOSITOR.md` (playback / render question).

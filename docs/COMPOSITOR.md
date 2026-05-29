@@ -100,13 +100,28 @@ If the previous tick's compose is still in flight when the next display tick fir
 
 ### Cache fast-path
 
-`WorkspaceModel.cacheSegmentAtPlayhead()` returns the on-disk segment URL covering the current playhead (or nil). When non-nil, the realtime host uses `CacheFrameReader` instead of the compositor — direct `AVAssetReader` → `CVPixelBuffer` → `compositor.presentSingleSourceFrame(into: drawable.texture)`.
+`WorkspaceModel.cacheSegment(atSeconds:)` returns the on-disk segment URL covering the given (frame-quantized) compose time, or nil. It reads an in-memory mirror of the segment list (`renderSegments()`), refreshed only on mutation — never a per-tick disk scan. When non-nil, the realtime host uses `CacheFrameReader` instead of the compositor — direct `AVAssetReader` → `CVPixelBuffer` → `compositor.presentSingleSourceFrame(into: drawable.texture)`.
 
 `CacheFrameReader`:
 - Lazily opens the `AVAssetReader` on the first `render(at:)` call, seeking to the actual target time (NOT to 0 — that's what caused the post-render fast-motion sweep).
 - Maintains the same `[pts, pts+duration)` frame cache as the compositor.
 - Backward jump or large forward gap (> 0.5 s) → reseek; otherwise walk forward via `copyNextSampleBuffer`.
 - Reuses the compositor's blend pipeline (via `presentSingleSourceFrame`) so the cache picture aspect-fits into the drawable identically to the live path.
+
+### Frame-exact playback invariants (2026-05-29 — load-bearing, don't regress)
+
+Hard-won during the playback-chop hunt. Each one fixed a real, reproducible artifact:
+
+- **Frame-quantized compose (WYSIWYG).** The realtime tick composes at `quantizeToFrame(playhead)` (floor to the sequence frame grid, anchored at timeline 0) — NOT the raw continuous playhead. The program monitor shows exactly the frame the renderer would, instead of oversampling an eased transform at display rate. `RealtimeProgramHost.quantizeToFrame`.
+- **Sample 4 ms INTO the source frame, never on the boundary.** `pullFrame` uses `target = t + 0.004` and `CacheFrameReader` uses `offset + 0.004`. When a clip's source-in equals its timeline-in (a contiguous blade — the common case), the quantized compose time lands exactly on source frame boundaries, where the `[pts, pts+dur)` window test is fragile to cross-timescale rounding and grabs the wrong frame (~22% 1-frame skips = chop). The epsilon never changes which frame is chosen. **Do not remove.**
+- **Playhead is NOT `@Published`.** It updates every frame during playback; republishing the whole `WorkspaceModel` re-rendered the entire SwiftUI tree + re-pushed the timeline per frame. Per-frame consumers ride `playheadClock: PlayheadClock` (timecode label only) + `onPlayheadChange` (timeline line). User seeks/scrubs go through `setPlayhead`, which sends ONE `objectWillChange` so paused edits still refresh everything.
+- **Timeline playhead is a CALayer overlay**, repositioned with implicit animations disabled — moving it never triggers a full `draw(rect:)`.
+- **Render link computes its own compose time from the wall clock** (`WorkspaceModel.composePlayheadSeconds`) rather than reading a value the *playback* display link updates at a different phase (that phase mismatch gave an uneven 4/5/6-tick frame cadence).
+- **Decoder cache key is overlap-aware.** `OfflineSequenceCompositor.DecoderKey` keys by `source.id` by default (same-source clips share one decoder → bladed cuts stay seamless), but a clip that overlaps a same-source sibling in timeline time gets its OWN decoder (`.clip`) so layering a clip over itself doesn't thrash one reader. The isolated set is recomputed only when the clip layout changes (`refreshIsolationIfNeeded`).
+- **Cache↔live grids must agree.** Pre-render start/end snap to frame boundaries (`renderInToOut`), and the cache-vs-live lookup `cacheSegment(atSeconds:)` is passed the host's *frame-quantized* compose time (not the raw playhead) so the lookup and the render agree on the same frame at the boundary. Prewarm (`compositor.prewarm(at:)`) warms the live decoder before the playhead exits a cached region; it re-arms each approach and runs AFTER `present()` so it never delays a visible frame.
+- **`presentSingleSourceFrame` uses a persistent 1×1 black texture** for letterbox bars — no per-frame scratch-buffer allocation + clear pass (that churn made cached playback stutter).
+
+Known remaining: a ~1-frame hiccup crossing OUT of a cached region (likely present-pipeline latency asymmetry between the single-pass cache blit and the two-pass live composite). See HANDOFF "Known follow-ups."
 
 ### Frame-drop indicator
 
