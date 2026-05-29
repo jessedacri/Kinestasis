@@ -75,6 +75,10 @@ public final class OfflineSequenceCompositor {
     private let blendPipeline: MTLRenderPipelineState
     private let blackPipeline: MTLRenderPipelineState
     private let crossDissolvePipeline: MTLRenderPipelineState
+    /// Persistent 1×1 black texture used as the letterbox backdrop when
+    /// presenting a single source frame — avoids allocating + clearing a
+    /// full-size scratch buffer every cached-playback frame.
+    private let blackTexture: MTLTexture
     /// Scratch pool for intermediate layer accumulation. Sized small
     /// (~4 buffers) because at any one time we hold the running
     /// accumulator plus, for cross-dissolves, one combined-AB temp.
@@ -86,15 +90,57 @@ public final class OfflineSequenceCompositor {
 
     // MARK: - Frame source pool
 
-    // Keyed by SOURCE id: clips that reference the same media file share
-    // one decoder. This keeps a bladed clip playing seamlessly across the
-    // cut (the two halves are the same source at contiguous times) — per
-    // PLACED-clip keying instead made every such cut a cold decoder seek
-    // (a visible freeze). The cost is that two same-source clips visible
-    // SIMULTANEOUSLY at different times share one reader and thrash; that
-    // rarer overlay case is handled separately (overlap-aware keying TBD).
-    private var frameSources: [ClipID: AVAssetFrameSource] = [:]
-    private var lastSourceTime: [ClipID: Double] = [:]
+    /// Decoder cache key. Same-source clips share ONE decoder by default
+    /// (`.source`) so a bladed clip plays seamlessly across the cut. But
+    /// clips that overlap a same-source sibling in timeline time (layering
+    /// a clip over itself) each get their OWN decoder (`.clip`) — otherwise
+    /// they'd yank one reader between two source positions every frame.
+    /// See `refreshIsolationIfNeeded`.
+    private enum DecoderKey: Hashable {
+        case source(ClipID)
+        case clip(PlacedClipID)
+    }
+    private var frameSources: [DecoderKey: AVAssetFrameSource] = [:]
+    private var lastSourceTime: [DecoderKey: Double] = [:]
+
+    // Video clips that overlap a same-source sibling in time → isolated to
+    // their own decoder. Recomputed only when the clip layout changes.
+    private var isolatedClips: Set<PlacedClipID> = []
+    private var isolationSignature = 0
+
+    /// O(n²) over video clips, but only when the layout signature changes
+    /// (an edit); the per-compose cost is just the O(n) signature fold.
+    private func refreshIsolationIfNeeded() {
+        var sig = 17
+        for track in sequence.videoTracks {
+            for c in track.clips {
+                sig = sig &* 31 &+ c.id.rawValue.hashValue
+                sig = sig &* 31 &+ Int(c.timelineRange.start.seconds * 1000)
+                sig = sig &* 31 &+ Int(c.timelineRange.duration.seconds * 1000)
+                sig = sig &* 31 &+ c.sourceClipID.rawValue.hashValue
+            }
+        }
+        guard sig != isolationSignature else { return }
+        isolationSignature = sig
+        var clips: [(id: PlacedClipID, src: ClipID, range: TimeRange)] = []
+        for track in sequence.videoTracks {
+            for c in track.clips { clips.append((c.id, c.sourceClipID, c.timelineRange)) }
+        }
+        var isolated = Set<PlacedClipID>()
+        for i in clips.indices {
+            for j in clips.indices where i != j {
+                if clips[i].src == clips[j].src, clips[i].range.overlaps(clips[j].range) {
+                    isolated.insert(clips[i].id)
+                    break
+                }
+            }
+        }
+        isolatedClips = isolated
+    }
+
+    private func decoderKey(for clipID: PlacedClipID, sourceID: ClipID) -> DecoderKey {
+        isolatedClips.contains(clipID) ? .clip(clipID) : .source(sourceID)
+    }
 
     public init(
         sequence: Sequence,
@@ -183,6 +229,19 @@ public final class OfflineSequenceCompositor {
             throw CompositorError.pixelBufferPoolCreate(poolStatus)
         }
         self.scratchPool = pool
+
+        // 1×1 opaque-black texture for letterbox bars in single-source
+        // present. Built once; sampled (clamped) over the whole bottom.
+        let blackTexDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: 1, height: 1, mipmapped: false)
+        blackTexDesc.usage = [.shaderRead]
+        guard let black = device.makeTexture(descriptor: blackTexDesc) else {
+            throw CompositorError.textureBindingFailed
+        }
+        var px: [UInt8] = [0, 0, 0, 255]   // BGRA opaque black
+        black.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                      withBytes: &px, bytesPerRow: 4)
+        self.blackTexture = black
     }
 
     public func teardown() {
@@ -197,14 +256,18 @@ public final class OfflineSequenceCompositor {
     /// decoder + held CVPixelBuffer per clip ever placed.
     public func pruneUnusedSources() {
         guard !frameSources.isEmpty else { return }
-        var live = Set<ClipID>()
-        for track in sequence.videoTracks { for c in track.clips { live.insert(c.sourceClipID) } }
-        for track in sequence.audioTracks { for c in track.clips { live.insert(c.sourceClipID) } }
-        for id in frameSources.keys where !live.contains(id) {
-            frameSources[id]?.tearDown()
-            frameSources.removeValue(forKey: id)
-            lastSourceTime.removeValue(forKey: id)
-            lastDeliveredFrame.removeValue(forKey: id)
+        refreshIsolationIfNeeded()
+        // frameSources is populated only by video pulls, so the live key
+        // set is the decoder key of every video clip.
+        var live = Set<DecoderKey>()
+        for track in sequence.videoTracks {
+            for c in track.clips { live.insert(decoderKey(for: c.id, sourceID: c.sourceClipID)) }
+        }
+        for key in frameSources.keys where !live.contains(key) {
+            frameSources[key]?.tearDown()
+            frameSources.removeValue(forKey: key)
+            lastSourceTime.removeValue(forKey: key)
+            lastDeliveredFrame.removeValue(forKey: key)
         }
     }
 
@@ -257,14 +320,12 @@ public final class OfflineSequenceCompositor {
         )
 
         guard let cmd = commandQueue.makeCommandBuffer() else { return }
-        // Pool buffer for the black "bottom" — the blend shader does
-        // (bottom * (1-α)) + (top * α) at α=1, so the bottom would be
-        // irrelevant for the destRect, but it IS what we want in the
-        // letterbox region. Black bars there.
-        guard let bottom = try? allocScratch() else { return }
-        encodeBlackFill(into: bottom, on: cmd)
+        // Blend the source over a persistent 1×1 black texture (the
+        // letterbox backdrop). Single pass, no per-frame scratch buffer
+        // allocation or black-fill pass — that churn was what made cached
+        // playback stutter worse than live.
         encodeBlend(
-            bottom: bottom, top: source,
+            bottomTexture: blackTexture, top: source,
             uniforms: uniforms,
             intoTexture: output, on: cmd
         )
@@ -581,6 +642,7 @@ public final class OfflineSequenceCompositor {
     /// frame doesn't stall on a cold seek. Best-effort; errors are
     /// swallowed (a failed warm just means the seek happens later).
     public func prewarm(at timelineSeconds: Double) async {
+        refreshIsolationIfNeeded()
         let probe = RationalTime(value: Int64(timelineSeconds * 1000), scale: 1000)
         for track in sequence.videoTracks {
             guard let clip = track.clips.first(where: { $0.timelineRange.contains(probe) }),
@@ -588,11 +650,13 @@ public final class OfflineSequenceCompositor {
             let clipLocal = timelineSeconds - clip.timelineRange.start.seconds
             let shift = pairedFadeInSourceShift(for: clip, in: track)
             let sourceTime = clip.sourceRange.start.seconds + clipLocal + shift
-            _ = try? await pullFrame(source: source, atSourceTime: sourceTime)
+            let key = decoderKey(for: clip.id, sourceID: clip.sourceClipID)
+            _ = try? await pullFrame(key: key, source: source, atSourceTime: sourceTime)
         }
     }
 
     private func effectiveLayers(at t: Double) async throws -> [LayerContribution] {
+        refreshIsolationIfNeeded()
         var layers: [LayerContribution] = []
         let probe = RationalTime(value: Int64(t * 1000), scale: 1000)
 
@@ -608,7 +672,8 @@ public final class OfflineSequenceCompositor {
                 let shift = pairedFadeInSourceShift(for: clip, in: track)
                 let clipLocal = t - clip.timelineRange.start.seconds
                 let sourceTime = clip.sourceRange.start.seconds + clipLocal + shift
-                let frame = try await pullFrame(source: source, atSourceTime: sourceTime)
+                let key = decoderKey(for: clip.id, sourceID: clip.sourceClipID)
+                let frame = try await pullFrame(key: key, source: source, atSourceTime: sourceTime)
                 let uniforms = layerUniforms(for: clip, source: source, fadeAlpha: fade, clipLocalSeconds: clipLocal)
                 layers.append(.single(frame, uniforms))
             }
@@ -741,8 +806,10 @@ public final class OfflineSequenceCompositor {
             let bSourceTime = b.sourceRange.start.seconds + (t - start)   // shift = leftHalf
             let progress = (t - start) / total
 
-            let aFrame = try await pullFrame(source: sa, atSourceTime: aSourceTime)
-            let bFrame = try await pullFrame(source: sb, atSourceTime: bSourceTime)
+            let aKey = decoderKey(for: a.id, sourceID: a.sourceClipID)
+            let bKey = decoderKey(for: b.id, sourceID: b.sourceClipID)
+            let aFrame = try await pullFrame(key: aKey, source: sa, atSourceTime: aSourceTime)
+            let bFrame = try await pullFrame(key: bKey, source: sb, atSourceTime: bSourceTime)
             // Each clip carries its own transform — the alpha-aware
             // cross-dissolve shader uses both A's and B's destRect /
             // cropRect to mix them at the correct aspect (no squishing
@@ -837,10 +904,9 @@ public final class OfflineSequenceCompositor {
         let endPTS: CMTime
         let pixelBuffer: CVPixelBuffer
     }
-    private var lastDeliveredFrame: [ClipID: DeliveredFrame] = [:]
+    private var lastDeliveredFrame: [DecoderKey: DeliveredFrame] = [:]
 
-    private func pullFrame(source: ClipSource, atSourceTime t: Double) async throws -> CVPixelBuffer {
-        let key = source.id
+    private func pullFrame(key: DecoderKey, source: ClipSource, atSourceTime t: Double) async throws -> CVPixelBuffer {
         // Nudge the sample point a few ms INTO the frame interval. When a
         // clip's source-in equals its timeline-in (a contiguous blade),
         // the frame-quantized compose time lands exactly on source frame
@@ -859,7 +925,7 @@ public final class OfflineSequenceCompositor {
             return cached.pixelBuffer
         }
 
-        let fs = try await ensureFrameSource(for: source)
+        let fs = try await ensureFrameSource(key: key, source: source)
         let nominalDur = CMTime(
             seconds: 1.0 / max(1.0, fs.nominalFrameRate),
             preferredTimescale: 600
@@ -928,15 +994,15 @@ public final class OfflineSequenceCompositor {
         return buf
     }
 
-    private func ensureFrameSource(for source: ClipSource) async throws -> AVAssetFrameSource {
-        if let cached = frameSources[source.id] { return cached }
+    private func ensureFrameSource(key: DecoderKey, source: ClipSource) async throws -> AVAssetFrameSource {
+        if let cached = frameSources[key] { return cached }
         let fs: AVAssetFrameSource
         do {
             fs = try await AVAssetFrameSource.load(url: source.url)
         } catch {
             throw CompositorError.frameSourceLoadFailed(error.localizedDescription)
         }
-        frameSources[source.id] = fs
+        frameSources[key] = fs
         return fs
     }
 
@@ -1005,9 +1071,20 @@ public final class OfflineSequenceCompositor {
         intoTexture dst: MTLTexture,
         on cmd: MTLCommandBuffer
     ) {
-        guard let bottomTex = makeTexture(from: bottom, usage: [.shaderRead]),
-              let topTex = makeTexture(from: top, usage: [.shaderRead])
-        else { return }
+        guard let bottomTex = makeTexture(from: bottom, usage: [.shaderRead]) else { return }
+        encodeBlend(bottomTexture: bottomTex, top: top, uniforms: uniforms, intoTexture: dst, on: cmd)
+    }
+
+    /// Blend variant whose bottom is an existing `MTLTexture` (e.g. the
+    /// persistent black letterbox texture) — skips wrapping a CVPixelBuffer.
+    private func encodeBlend(
+        bottomTexture bottomTex: MTLTexture,
+        top: CVPixelBuffer,
+        uniforms: LayerUniforms,
+        intoTexture dst: MTLTexture,
+        on cmd: MTLCommandBuffer
+    ) {
+        guard let topTex = makeTexture(from: top, usage: [.shaderRead]) else { return }
 
         let descriptor = MTLRenderPassDescriptor()
         descriptor.colorAttachments[0].texture = dst
