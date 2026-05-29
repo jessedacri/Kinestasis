@@ -460,7 +460,13 @@ public final class CacheFrameReader: @unchecked Sendable {
         queue: MTLCommandQueue,
         compositor: OfflineSequenceCompositor?
     ) {
-        let target = CMTime(seconds: max(0, offsetSeconds), preferredTimescale: 600)
+        // Sample a hair INTO the frame, matching the live compositor's
+        // pullFrame epsilon — the offset lands exactly on .mov frame
+        // boundaries (frame-quantized playhead minus a frame-aligned
+        // segment start), where the window test is boundary-fragile.
+        // Without this the cached frame can differ from live by one frame
+        // at the cache↔live boundary.
+        let target = CMTime(seconds: max(0, offsetSeconds) + 0.004, preferredTimescale: 600)
 
         // Decide whether to seek the AVAssetReader or walk forward.
         // - Reader not started yet (first render): seek straight to target.

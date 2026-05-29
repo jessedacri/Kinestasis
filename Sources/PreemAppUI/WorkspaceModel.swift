@@ -1508,10 +1508,25 @@ public final class WorkspaceModel: ObservableObject {
         renderError = nil
         lastRenderURL = nil
 
-        let (startSec, endSec) = renderRange(in: sequence)
+        var (startSec, endSec) = renderRange(in: sequence)
         guard endSec > startSec + 0.001 else {
             renderError = "Render range is empty."
             return
+        }
+        // Snap the render start DOWN to a sequence frame boundary so the
+        // cached segment's frame grid matches the live preview grid
+        // (which quantizes the playhead to frames anchored at 0). A
+        // non-frame-aligned In point otherwise leaves the cached frames
+        // offset by up to one frame from live — a visible jump at the
+        // cache↔live boundary.
+        let fr = sequence.settings.frameRate
+        let spf = Double(fr.rationalScale) / Double(max(1, fr.rationalRate))
+        if spf > 0 {
+            startSec = (startSec / spf).rounded(.down) * spf
+            // End on a frame boundary too, so the cache↔live boundary
+            // sits on the grid and the prewarm seeds the exact first
+            // live frame.
+            endSec = (endSec / spf).rounded(.up) * spf
         }
 
         let projectID = project.id
