@@ -93,9 +93,16 @@ A second, more stubborn chop (a clip choppy on load, smooth the instant you move
 
 If playback ever regresses, the fastest diagnostic is source-frame cadence: count delivered-PTS steps between cache misses in `pullFrame`; steady playback should be all 1-frame advances, ~0 jumps. See [[preem_frame_boundary_sampling]].
 
+## Playback engine — done 2026-05-29 (second pass)
+
+Both prior follow-ups shipped, plus boundary fixes:
+- **Overlap-aware frame keying** — DONE. `DecoderKey` keys by `source.id` (seamless same-source cuts) but isolates clips that overlap a same-source sibling in time (`refreshIsolationIfNeeded`, O(n²) only on edits) so layering a clip over itself doesn't thrash one decoder.
+- **Pre-render cache reader stall** — DONE. `presentSingleSourceFrame` blends over a persistent 1×1 black texture (no per-frame scratch alloc + black-fill).
+- **Cache↔live frame-grid alignment** — DONE. Pre-render start/end snapped to frame boundaries; `CacheFrameReader` samples 4ms into the frame (matching `pullFrame`); the cache-vs-live lookup (`cacheSegment(atSeconds:)`) uses the host's frame-quantized compose time so the lookup and the render agree on the same frame.
+- **Prewarm re-arm** — DONE. `lastPrewarmedSegEnd` resets when the playhead leaves the warm window, so every approach (not just the first) warms the live decoder; prewarm runs AFTER present so it never delays the visible frame.
+
 ## Known follow-ups (clearly scoped)
-- **Pre-render cache reader stall** — playing a pre-rendered region is choppier than live on heavy 4K; `presentSingleSourceFrame` allocates a buffer + flushes the texture cache every frame. The cache should be at least as smooth as live.
-- **Overlap-aware frame keying** — let two clips from the *same source* play simultaneously (layering pieces of one file) without thrashing one decoder, *without* re-breaking same-source cuts. Approach: key by `source.id` normally, isolate only clips that actually overlap a same-source sibling.
+- **Cache↔live boundary micro-hiccup (TIGHTENING PASS).** Crossing OUT of a pre-rendered region into live still shows a ~1-frame hiccup. Ruled out: compose stall (transition frames are 0.2–4ms, zero inflight skips), content-grid misalignment, cache/live lookup-vs-compose time mismatch, cold decoder seek (prewarm warms it). **Leading hypothesis:** present-pipeline latency asymmetry — the cache path is a single-pass blit (`presentSingleSourceFrame`), the live path is a two-pass composite (`composeAsync` → scratch → aspect-fit), so the live frame's GPU completes ~1 vsync later at the switch. `present()` is non-blocking so this doesn't show in compose-ms. **To investigate:** add a Metal `addCompletedHandler` to log GPU-completion time around the transition; if confirmed, unify the two paths (route the cached frame through the same two-pass present, or give both the same pipeline depth) so latency is identical across the boundary. Low user impact (one frame, only at I/O-render edges); deferred by user as a polish pass.
 
 ## 2026-05-28 audit follow-through
 
