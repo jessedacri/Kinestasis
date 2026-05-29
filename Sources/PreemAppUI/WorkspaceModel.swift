@@ -1822,8 +1822,13 @@ public final class WorkspaceModel: ObservableObject {
 
     /// On-disk pre-render segment containing the current playhead, if
     /// any. Drives the program viewer's "cache playback" path.
-    public func cacheSegmentAtPlayhead() -> (url: URL, startSeconds: Double, endSeconds: Double)? {
-        let tMs = Int64(playheadTime.seconds * 1000)
+    /// Cache segment covering `seconds`. The realtime host passes its
+    /// FRAME-QUANTIZED compose time (not the raw playhead) so the
+    /// cache↔live decision lands on the same frame the compositor will
+    /// render — otherwise they disagree in the sub-frame sliver at a
+    /// segment boundary and the boundary frame is duplicated.
+    public func cacheSegment(atSeconds seconds: Double) -> (url: URL, startSeconds: Double, endSeconds: Double)? {
+        let tMs = Int64(seconds * 1000)
         for seg in renderSegments() where seg.startMs <= tMs && tMs < seg.endMs {
             return (seg.url, Double(seg.startMs) / 1000.0, Double(seg.endMs) / 1000.0)
         }

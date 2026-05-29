@@ -202,7 +202,7 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             // frame maps to the same source time, so `pullFrame` holds
             // its cache instead of re-seeking.
             let playhead = frameNow
-            let cacheSeg = workspace.cacheSegmentAtPlayhead()
+            let cacheSeg = workspace.cacheSegment(atSeconds: frameNow)
             let reader: CacheFrameReader? = cacheSeg.flatMap { cacheFrameReader(for: $0.url) }
             let segStart = cacheSeg?.startSeconds ?? 0
             let segEnd = cacheSeg?.endSeconds ?? 0
