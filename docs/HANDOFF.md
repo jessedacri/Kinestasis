@@ -1,10 +1,12 @@
 # Preem — Handoff Notes
 
-Snapshot for the next session. Last updated 2026-05-28. Pairs with `CLAUDE.md` (developer guide), `ARCHITECTURE.md` (load-bearing decisions), `TIMELINE.md` (editing patterns), `COMPOSITOR.md` (playback + render runtime), `ROADMAP.md` (milestones), `APPLE-SILICON.md` (API matrix).
+Snapshot for the next session. Last updated 2026-05-29. Pairs with `CLAUDE.md` (developer guide), `ARCHITECTURE.md` (load-bearing decisions), `TIMELINE.md` (editing patterns), `COMPOSITOR.md` (playback + render runtime), `ROADMAP.md` (milestones), `APPLE-SILICON.md` (API matrix).
 
 ## Where things stand
 
 **M1 + M2 are functionally complete.** Big M3 chunks landed across the 2026-05-26 → 2026-05-28 push: pre-render + Export, unified realtime compositor, Transform/Crop, alpha-aware cross-dissolves — see prior HANDOFF entries (in git) for the May 26/27 details.
+
+**2026-05-29:** playback chop is **solved** (frame-boundary source sampling — see that section below) and the live path is now frame-accurate WYSIWYG. A full cleanliness/perf audit also shipped (see 2026-05-28 sections). All of it is on the `audit/cleanup-and-perf` branch — **merge to `main` next.** Two clearly-scoped follow-ups remain (pre-render cache reader stall; overlap-aware keying).
 
 **The 2026-05-28 push (this session) shipped:**
 
@@ -70,9 +72,9 @@ Order:
 6. **`.preem` package format** — currently a flat JSON file. Waveform / thumbnail / proxy caches will want to live inside the project bundle. Pre-render cache lives at `~/Library/Caches/Preem/projects/<id>/prerender/` and survives renames; not urgent.
 7. **Render-graph fusion** — multiple `effects` on a clip iterate one Metal pass each. Fusing into one pass per layer would matter as the effect arsenal grows.
 
-## Open mystery — overnight playback choppiness (root cause found 2026-05-28)
+## Playback choppiness — SOLVED (2026-05-28 → 2026-05-29)
 
-User reported that after leaving Preem open overnight, actual playback (not just the chip) got choppy. The 2026-05-28 audit found three per-tick costs paid on the main actor every display-link frame, which compound over a long session. All three are now fixed:
+Two separate causes, both fixed. See the 2026-05-29 section below for the headline one (frame-boundary sampling). The 2026-05-28 audit first cleared three per-tick costs paid on the main actor every display-link frame:
 
 1. **Per-frame disk scan (prime suspect).** The realtime tick called `cacheSegmentAtPlayhead()` → `PreRenderCache.allSegments`, doing a synchronous `FileManager.contentsOfDirectory` + string parse + array alloc every frame. Now `WorkspaceModel` mirrors the segment list in memory (`renderSegments()` / `refreshRenderSegmentCache()`) and refreshes only on mutation (render complete, cache clear, sequence switch). `PreRenderCache.segmentContaining` was removed.
 2. **`@Published` publish storm.** `playheadTime` / `sourceTimeSeconds` were written unconditionally every tick, firing `objectWillChange` on the whole model even when the value was unchanged. Now guarded on value change.
@@ -80,7 +82,20 @@ User reported that after leaving Preem open overnight, actual playback (not just
 
 Also fixed a slow memory climb: `OfflineSequenceCompositor` now evicts `frameSources` / `lastDeliveredFrame` / `lastSourceTime` for clips no longer in the sequence (`pruneUnusedSources()`, gated on clip-count change so steady-state playback stays allocation-free). Previously it retained a decoder + held `CVPixelBuffer` per source ever placed.
 
-If it still reproduces, add telemetry to the realtime tick: rolling p50/p99 of ms-per-tick, `CVPixelBufferPool` allocate failures, and `frameSources.count`. Remaining candidate not yet ruled out: macOS swapping the working set after extended idle (first wake = slow).
+## 2026-05-29 — the real playback chop + WYSIWYG preview
+
+A second, more stubborn chop (a clip choppy on load, smooth the instant you moved it) was chased to two things:
+
+1. **Frame-boundary source sampling (THE chop).** The realtime compose time is frame-quantized to the sequence grid (`quantizeToFrame`, anchored at 0). When a clip's source-in equals its timeline-in — i.e. a **contiguous blade**, the common case — `sourceTime` lands *exactly* on source frame boundaries, where `pullFrame`'s `[pts, pts+dur)` window test is fragile to cross-timescale rounding and intermittently grabs the adjacent frame: a steady ~22% stream of 1-frame skips. **Fix:** `pullFrame` samples 4 ms *into* the frame (`t + 0.004`) so selection sits robustly inside one frame. Moving the clip "fixed" it only because it broke `srcIn == tlIn`. **Don't remove the epsilon.** (Diagnosed via source-cadence telemetry — the only metric that caught it; clock/push/pull/compose all read clean.)
+2. **WYSIWYG + main-actor decongestion.** Along the way the live path got real wins that stay: `playheadTime` is **no longer `@Published`** — per-frame playback no longer re-renders the whole SwiftUI tree or re-pushes the timeline. The per-frame value rides a tiny `PlayheadClock` (observed only by the timecode) + an `onPlayheadChange` callback. The timeline **playhead is a CALayer overlay** (`movePlayhead` / `positionPlayheadLayer`), so moving it doesn't force a full `draw(rect:)`. The render link computes its compose time straight from the wall clock (`composePlayheadSeconds`) instead of reading a value the *playback* link updates at a different phase. Scrub/seek still sends one `objectWillChange` (`setPlayhead`) so paused edits refresh everything.
+
+**Reverted dead end:** per-*placed-clip* frame-cache keying (tried for same-source overlays) froze playback at every same-source cut — a bladed clip cold-seeked a separate decoder at the cut. Back to `source.id` keying (seamless cuts). The same-source-*overlay* case is a known follow-up.
+
+If playback ever regresses, the fastest diagnostic is source-frame cadence: count delivered-PTS steps between cache misses in `pullFrame`; steady playback should be all 1-frame advances, ~0 jumps. See [[preem_frame_boundary_sampling]].
+
+## Known follow-ups (clearly scoped)
+- **Pre-render cache reader stall** — playing a pre-rendered region is choppier than live on heavy 4K; `presentSingleSourceFrame` allocates a buffer + flushes the texture cache every frame. The cache should be at least as smooth as live.
+- **Overlap-aware frame keying** — let two clips from the *same source* play simultaneously (layering pieces of one file) without thrashing one decoder, *without* re-breaking same-source cuts. Approach: key by `source.id` normally, isolate only clips that actually overlap a same-source sibling.
 
 ## 2026-05-28 audit follow-through
 
