@@ -555,6 +555,13 @@ private struct TimelineHostView: NSViewRepresentable {
         view.audioTrackLevelProvider = { [weak workspace] idx in
             workspace?.audio.peakLevel(forAudioTrackIndex: idx) ?? 0
         }
+        // Drive the playhead line directly during playback so a moving
+        // playhead doesn't republish the whole WorkspaceModel and re-push
+        // the timeline every frame (the playback-staccato cause). Seeks /
+        // scrubs still flow through `push` via objectWillChange.
+        workspace.onPlayheadChange = { [weak view] time in
+            MainActor.assumeIsolated { view?.movePlayhead(to: time) }
+        }
         push(into: view)
         return view
     }

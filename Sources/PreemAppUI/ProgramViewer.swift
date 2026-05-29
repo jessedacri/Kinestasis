@@ -60,9 +60,10 @@ struct ProgramViewer: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary.opacity(0.5))
                 }
-                Text(formattedTimecode)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                ProgramTimecodeLabel(
+                    clock: workspace.playheadClock,
+                    frameRate: workspace.activeSequence?.settings.frameRate ?? .thirty
+                )
                 if workspace.isPlaying {
                     Image(systemName: "play.fill")
                         .font(.system(size: 10))
@@ -112,12 +113,6 @@ struct ProgramViewer: View {
         }
     }
 
-    private var formattedTimecode: String {
-        let t = workspace.playheadTime.seconds
-        let frameRate = workspace.activeSequence?.settings.frameRate ?? .thirty
-        return Timecode.format(seconds: t, frameRate: frameRate)
-    }
-
     /// Sequence spec string in the form "3840x2160 23.976" so the user
     /// always sees the active sequence's resolution + frame rate next
     /// to the playhead readout. Returns nil when no sequence is active.
@@ -143,6 +138,19 @@ struct ProgramViewer: View {
             }
         }
         return .empty
+    }
+}
+
+/// Timecode readout that observes only the lightweight `PlayheadClock`,
+/// so the per-frame playhead update during playback re-renders just this
+/// label — not the whole program viewer or the rest of the app.
+private struct ProgramTimecodeLabel: View {
+    @ObservedObject var clock: PlayheadClock
+    let frameRate: FrameRate
+    var body: some View {
+        Text(Timecode.format(seconds: clock.seconds, frameRate: frameRate))
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(.secondary)
     }
 }
 

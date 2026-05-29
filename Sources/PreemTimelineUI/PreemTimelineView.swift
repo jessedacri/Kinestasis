@@ -160,7 +160,15 @@ public final class PreemTimelineView: NSView {
     }
 
     public var playheadTime: RationalTime = .zero {
-        didSet { needsDisplay = true }
+        // Reposition the playhead overlay layer only — no full redraw.
+        didSet { positionPlayheadLayer() }
+    }
+
+    /// Per-frame playhead drive during playback. Moves the overlay layer
+    /// instead of repainting the timeline.
+    public func movePlayhead(to time: RationalTime) {
+        guard time != playheadTime else { return }
+        playheadTime = time
     }
 
     public var selectedClipIDs: Set<PlacedClipID> = [] {
@@ -388,17 +396,66 @@ public final class PreemTimelineView: NSView {
     }
     private var dragGhost: DragGhost?
 
+    // Playhead is a CALayer overlay, not drawn in draw(rect:). Moving it
+    // during playback repositions the layer instead of repainting the
+    // whole 4K timeline every frame (the playback-staccato cause).
+    private let playheadLineLayer = CALayer()
+    private let playheadTriLayer = CAShapeLayer()
+
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
+        setupPlayheadLayers()
         registerForDraggedTypes([.string])
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
+        setupPlayheadLayers()
         registerForDraggedTypes([.string])
+    }
+
+    private func setupPlayheadLayers() {
+        playheadLineLayer.backgroundColor = NSColor.systemRed.cgColor
+        playheadLineLayer.zPosition = 1000
+        playheadLineLayer.isHidden = true
+        playheadTriLayer.fillColor = NSColor.systemRed.cgColor
+        playheadTriLayer.zPosition = 1000
+        playheadTriLayer.isHidden = true
+        layer?.addSublayer(playheadLineLayer)
+        layer?.addSublayer(playheadTriLayer)
+    }
+
+    private func positionPlayheadLayer() {
+        guard let host = layer else { return }
+        let x = xForTime(playheadTime.seconds)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard x >= Metrics.laneControlsWidth else {
+            playheadLineLayer.isHidden = true
+            playheadTriLayer.isHidden = true
+            return
+        }
+        let h = bounds.height
+        playheadLineLayer.isHidden = false
+        playheadTriLayer.isHidden = false
+        playheadLineLayer.frame = CGRect(x: x - 0.625, y: 0, width: 1.25, height: h)
+        // Triangle handle at the visible TOP of the ruler. The backing
+        // layer's geometry may or may not be flipped to match the view;
+        // honor whichever so the handle sits at the top either way.
+        let flipped = host.isGeometryFlipped
+        let topY: CGFloat = flipped ? 0 : h
+        let tipY: CGFloat = flipped ? 8 : h - 8
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: x - 5, y: topY))
+        p.addLine(to: CGPoint(x: x + 5, y: topY))
+        p.addLine(to: CGPoint(x: x, y: tipY))
+        p.closeSubpath()
+        playheadTriLayer.frame = bounds
+        playheadTriLayer.path = p
     }
 
     // MARK: - Hover tracking
@@ -498,8 +555,10 @@ public final class PreemTimelineView: NSView {
         }
         drawCacheBars(ctx: ctx)
         drawDragGhost(ctx: ctx)
-        drawPlayhead(ctx: ctx)
         drawBoxSelection(ctx: ctx)
+        // Playhead is a CALayer overlay; reposition it here so a full
+        // redraw (scroll / zoom / resize) keeps it aligned.
+        positionPlayheadLayer()
     }
 
     /// Thin green bar at the bottom of the ruler showing pre-rendered
@@ -1666,25 +1725,6 @@ public final class PreemTimelineView: NSView {
         // Slight darkening overlay so the clip label stays readable.
         ctx.setFillColor(NSColor.black.withAlphaComponent(0.18).cgColor)
         ctx.fill(rect)
-    }
-
-    private func drawPlayhead(ctx: CGContext) {
-        let x = xForTime(playheadTime.seconds)
-        guard x >= Metrics.laneControlsWidth else { return }
-        ctx.setStrokeColor(NSColor.systemRed.cgColor)
-        ctx.setLineWidth(1.25)
-        ctx.move(to: CGPoint(x: x, y: 0))
-        ctx.addLine(to: CGPoint(x: x, y: bounds.height))
-        ctx.strokePath()
-
-        // Triangle handle on the ruler
-        ctx.setFillColor(NSColor.systemRed.cgColor)
-        let tri = NSBezierPath()
-        tri.move(to: CGPoint(x: x - 5, y: 0))
-        tri.line(to: CGPoint(x: x + 5, y: 0))
-        tri.line(to: CGPoint(x: x, y: 8))
-        tri.close()
-        tri.fill()
     }
 
     // MARK: - Lane enumeration

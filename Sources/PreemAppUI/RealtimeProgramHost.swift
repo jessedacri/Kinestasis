@@ -167,8 +167,9 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             // on a 60 Hz display) and reads as rhythmic judder. Regular
             // per-vsync presentation of the (possibly identical) frame is
             // what keeps playback smooth.
+            let rawPlayhead = workspace.composePlayheadSeconds()
             let frameNow = Self.quantizeToFrame(
-                workspace.playheadTime.seconds,
+                rawPlayhead,
                 frameRate: workspace.activeSequence?.settings.frameRate
             )
 

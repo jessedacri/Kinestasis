@@ -18,7 +18,28 @@ public final class WorkspaceModel: ObservableObject {
     @Published public var importing: Bool = false
     @Published public var mlInFlight: Set<ClipID> = []
     @Published public var activeSequenceID: SequenceID?
-    @Published public var playheadTime: RationalTime = .zero
+
+    /// Program playhead. Deliberately NOT `@Published`: it updates every
+    /// frame during playback, and republishing the whole WorkspaceModel
+    /// at the display rate re-renders the entire SwiftUI tree + re-pushes
+    /// the timeline each frame, starving the render display link (the
+    /// cause of playback staccato). Per-frame consumers are driven by
+    /// `playheadClock` (timecode) and `onPlayheadChange` (timeline line).
+    /// User-driven seeks/scrubs go through `setPlayhead`, which sends one
+    /// `objectWillChange` so paused edits still refresh the whole tree.
+    public var playheadTime: RationalTime = .zero {
+        didSet {
+            if playheadClock.seconds != playheadTime.seconds {
+                playheadClock.seconds = playheadTime.seconds
+            }
+            onPlayheadChange?(playheadTime)
+        }
+    }
+
+    /// Lightweight per-frame clock for the timecode readout. See `playheadTime`.
+    public let playheadClock = PlayheadClock()
+    /// Direct sink for the timeline's playhead line, set by the timeline host.
+    public var onPlayheadChange: ((RationalTime) -> Void)?
     @Published public var selectedClipIDs: Set<PlacedClipID> = []
     /// Currently selected gap (empty space between clips on a track).
     /// Mutually exclusive with `selectedClipIDs`: selecting a gap
@@ -1050,7 +1071,26 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     public func setPlayhead(_ time: RationalTime) {
+        // User-driven seek/scrub (not the 60Hz playback tick): refresh the
+        // whole tree once so the inspector / overlay / selection-dependent
+        // views update. The didSet still drives the clock + timeline line.
+        objectWillChange.send()
         playheadTime = time
+    }
+
+    /// Playhead time to compose at this instant, computed straight from
+    /// the wall clock. The render display link calls this so it samples a
+    /// smooth, monotonic value at its OWN cadence — rather than reading
+    /// `playheadTime`, which is advanced by a separate playback display
+    /// link at a different phase (through a `Task { @MainActor }` hop).
+    /// Sampling one 120Hz clock from another out-of-phase one produced
+    /// uneven 4/5/6-tick frame holds = the playback staccato. Falls back
+    /// to the stored playhead when not in program playback.
+    public func composePlayheadSeconds() -> Double {
+        guard case .program(let rate) = playbackState else { return playheadTime.seconds }
+        let elapsed = CACurrentMediaTime() - playStartHostTime
+        let latency = (abs(rate - 1.0) < 0.01) ? audio.outputLatencySeconds : 0
+        return max(0, playStartSeconds + elapsed * rate - latency)
     }
 
     // MARK: - Playback state machine
