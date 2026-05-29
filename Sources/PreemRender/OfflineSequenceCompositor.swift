@@ -86,12 +86,15 @@ public final class OfflineSequenceCompositor {
 
     // MARK: - Frame source pool
 
-    // Keyed by PLACED clip id, not source id: two clips that reference
-    // the same media file each get their own decoder + frame cache, so
-    // layering pieces of one source over itself doesn't thrash a single
-    // reader back and forth between two timeline positions every frame.
-    private var frameSources: [PlacedClipID: AVAssetFrameSource] = [:]
-    private var lastSourceTime: [PlacedClipID: Double] = [:]
+    // Keyed by SOURCE id: clips that reference the same media file share
+    // one decoder. This keeps a bladed clip playing seamlessly across the
+    // cut (the two halves are the same source at contiguous times) — per
+    // PLACED-clip keying instead made every such cut a cold decoder seek
+    // (a visible freeze). The cost is that two same-source clips visible
+    // SIMULTANEOUSLY at different times share one reader and thrash; that
+    // rarer overlay case is handled separately (overlap-aware keying TBD).
+    private var frameSources: [ClipID: AVAssetFrameSource] = [:]
+    private var lastSourceTime: [ClipID: Double] = [:]
 
     public init(
         sequence: Sequence,
@@ -194,9 +197,9 @@ public final class OfflineSequenceCompositor {
     /// decoder + held CVPixelBuffer per clip ever placed.
     public func pruneUnusedSources() {
         guard !frameSources.isEmpty else { return }
-        var live = Set<PlacedClipID>()
-        for track in sequence.videoTracks { for c in track.clips { live.insert(c.id) } }
-        for track in sequence.audioTracks { for c in track.clips { live.insert(c.id) } }
+        var live = Set<ClipID>()
+        for track in sequence.videoTracks { for c in track.clips { live.insert(c.sourceClipID) } }
+        for track in sequence.audioTracks { for c in track.clips { live.insert(c.sourceClipID) } }
         for id in frameSources.keys where !live.contains(id) {
             frameSources[id]?.tearDown()
             frameSources.removeValue(forKey: id)
@@ -585,7 +588,7 @@ public final class OfflineSequenceCompositor {
             let clipLocal = timelineSeconds - clip.timelineRange.start.seconds
             let shift = pairedFadeInSourceShift(for: clip, in: track)
             let sourceTime = clip.sourceRange.start.seconds + clipLocal + shift
-            _ = try? await pullFrame(clipID: clip.id, source: source, atSourceTime: sourceTime)
+            _ = try? await pullFrame(source: source, atSourceTime: sourceTime)
         }
     }
 
@@ -605,7 +608,7 @@ public final class OfflineSequenceCompositor {
                 let shift = pairedFadeInSourceShift(for: clip, in: track)
                 let clipLocal = t - clip.timelineRange.start.seconds
                 let sourceTime = clip.sourceRange.start.seconds + clipLocal + shift
-                let frame = try await pullFrame(clipID: clip.id, source: source, atSourceTime: sourceTime)
+                let frame = try await pullFrame(source: source, atSourceTime: sourceTime)
                 let uniforms = layerUniforms(for: clip, source: source, fadeAlpha: fade, clipLocalSeconds: clipLocal)
                 layers.append(.single(frame, uniforms))
             }
@@ -738,8 +741,8 @@ public final class OfflineSequenceCompositor {
             let bSourceTime = b.sourceRange.start.seconds + (t - start)   // shift = leftHalf
             let progress = (t - start) / total
 
-            let aFrame = try await pullFrame(clipID: a.id, source: sa, atSourceTime: aSourceTime)
-            let bFrame = try await pullFrame(clipID: b.id, source: sb, atSourceTime: bSourceTime)
+            let aFrame = try await pullFrame(source: sa, atSourceTime: aSourceTime)
+            let bFrame = try await pullFrame(source: sb, atSourceTime: bSourceTime)
             // Each clip carries its own transform — the alpha-aware
             // cross-dissolve shader uses both A's and B's destRect /
             // cropRect to mix them at the correct aspect (no squishing
@@ -834,25 +837,26 @@ public final class OfflineSequenceCompositor {
         let endPTS: CMTime
         let pixelBuffer: CVPixelBuffer
     }
-    private var lastDeliveredFrame: [PlacedClipID: DeliveredFrame] = [:]
+    private var lastDeliveredFrame: [ClipID: DeliveredFrame] = [:]
 
-    private func pullFrame(clipID: PlacedClipID, source: ClipSource, atSourceTime t: Double) async throws -> CVPixelBuffer {
+    private func pullFrame(source: ClipSource, atSourceTime t: Double) async throws -> CVPixelBuffer {
+        let key = source.id
         let target = CMTime(seconds: t, preferredTimescale: 600)
 
         // Cache hit: target lies inside the last delivered frame's
         // presentation window → re-use without touching the source.
-        if let cached = lastDeliveredFrame[clipID],
+        if let cached = lastDeliveredFrame[key],
            CMTimeCompare(target, cached.pts) >= 0,
            CMTimeCompare(target, cached.endPTS) < 0 {
             return cached.pixelBuffer
         }
 
-        let fs = try await ensureFrameSource(clipID: clipID, source: source)
+        let fs = try await ensureFrameSource(for: source)
         let nominalDur = CMTime(
             seconds: 1.0 / max(1.0, fs.nominalFrameRate),
             preferredTimescale: 600
         )
-        let prev = lastSourceTime[clipID]
+        let prev = lastSourceTime[key]
         // Backward jump → reseek. Forward by < 0.5 s we can walk to
         // via nextFrame.
         let needsSeek: Bool = {
@@ -872,9 +876,9 @@ public final class OfflineSequenceCompositor {
             let seekTarget = CMTimeMaximum(.zero, CMTimeSubtract(target, nominalDur))
             try await fs.seek(to: seekTarget)
             // Cached frame is no longer authoritative after a seek.
-            lastDeliveredFrame.removeValue(forKey: clipID)
+            lastDeliveredFrame.removeValue(forKey: key)
         }
-        lastSourceTime[clipID] = t
+        lastSourceTime[key] = t
 
         // Walk forward one frame at a time. The right frame is the one
         // whose [pts, pts+duration) window contains `target`. Cache
@@ -888,7 +892,7 @@ public final class OfflineSequenceCompositor {
             lastFrame = f
             let dur = (f.duration.isValid && f.duration.seconds > 0) ? f.duration : nominalDur
             let endPTS = CMTimeAdd(f.pts, dur)
-            lastDeliveredFrame[clipID] = DeliveredFrame(
+            lastDeliveredFrame[key] = DeliveredFrame(
                 pts: f.pts, endPTS: endPTS, pixelBuffer: f.pixelBuffer
             )
             // Target is inside this frame's window → that's the one.
@@ -906,7 +910,7 @@ public final class OfflineSequenceCompositor {
         // last frame we saw (best approximation), or the previously
         // cached frame, or black.
         if let f = lastFrame { return f.pixelBuffer }
-        if let cached = lastDeliveredFrame[clipID] { return cached.pixelBuffer }
+        if let cached = lastDeliveredFrame[key] { return cached.pixelBuffer }
         let buf = try allocScratch()
         if let cmd = commandQueue.makeCommandBuffer() {
             encodeBlackFill(into: buf, on: cmd)
@@ -916,15 +920,15 @@ public final class OfflineSequenceCompositor {
         return buf
     }
 
-    private func ensureFrameSource(clipID: PlacedClipID, source: ClipSource) async throws -> AVAssetFrameSource {
-        if let cached = frameSources[clipID] { return cached }
+    private func ensureFrameSource(for source: ClipSource) async throws -> AVAssetFrameSource {
+        if let cached = frameSources[source.id] { return cached }
         let fs: AVAssetFrameSource
         do {
             fs = try await AVAssetFrameSource.load(url: source.url)
         } catch {
             throw CompositorError.frameSourceLoadFailed(error.localizedDescription)
         }
-        frameSources[clipID] = fs
+        frameSources[source.id] = fs
         return fs
     }
 
