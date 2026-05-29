@@ -213,12 +213,14 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
             // When playing from cache and approaching its end, warm the
             // live compositor's decoders at the first post-cache frame so
             // crossing back into live compositing doesn't stall on a cold
-            // seek. Fires once per segment boundary; cheap after the first
-            // seed (the per-source hold cache absorbs repeats).
+            // seek. Re-arms whenever the playhead is outside the warm
+            // window (so every fresh approach — e.g. replay — warms again,
+            // not just the first time).
             var prewarmTime: Double? = nil
-            if reader != nil, cmp != nil,
-               segEnd - playhead <= Self.prewarmLead, segEnd - playhead > 0,
-               lastPrewarmedSegEnd != segEnd {
+            let inWarmWindow = reader != nil && segEnd - playhead <= Self.prewarmLead && segEnd - playhead > 0
+            if !inWarmWindow {
+                lastPrewarmedSegEnd = nil
+            } else if cmp != nil, lastPrewarmedSegEnd != segEnd {
                 prewarmTime = Self.quantizeToFrame(
                     segEnd, frameRate: workspace.activeSequence?.settings.frameRate
                 )
