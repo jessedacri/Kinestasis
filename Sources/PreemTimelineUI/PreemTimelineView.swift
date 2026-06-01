@@ -418,10 +418,10 @@ public final class PreemTimelineView: NSView {
     }
 
     private func setupPlayheadLayers() {
-        playheadLineLayer.backgroundColor = TimelinePalette.playhead.cgColor
+        playheadLineLayer.backgroundColor = NSColor.systemRed.cgColor
         playheadLineLayer.zPosition = 1000
         playheadLineLayer.isHidden = true
-        playheadTriLayer.fillColor = TimelinePalette.playhead.cgColor
+        playheadTriLayer.fillColor = NSColor.systemRed.cgColor
         playheadTriLayer.zPosition = 1000
         playheadTriLayer.isHidden = true
         layer?.addSublayer(playheadLineLayer)
@@ -574,7 +574,7 @@ public final class PreemTimelineView: NSView {
             let xEnd   = min(timelineMaxX, xForTime(seg.end))
             guard xEnd > xStart else { continue }
             let rect = CGRect(x: xStart, y: barY, width: xEnd - xStart, height: barHeight)
-            ctx.setFillColor(TimelinePalette.green.withAlphaComponent(0.85).cgColor)
+            ctx.setFillColor(NSColor.systemGreen.withAlphaComponent(0.85).cgColor)
             ctx.fill(rect)
         }
     }
@@ -599,7 +599,7 @@ public final class PreemTimelineView: NSView {
                     width: xOut - xIn,
                     height: 5
                 )
-                ctx.setFillColor(TimelinePalette.video.withAlphaComponent(0.55).cgColor)
+                ctx.setFillColor(NSColor.systemBlue.withAlphaComponent(0.55).cgColor)
                 ctx.fill(rulerBand)
 
                 // Faint vertical wash across the track area so editors
@@ -609,7 +609,7 @@ public final class PreemTimelineView: NSView {
                     width: xOut - xIn,
                     height: trackBandHeight
                 )
-                ctx.setFillColor(TimelinePalette.video.withAlphaComponent(0.06).cgColor)
+                ctx.setFillColor(NSColor.systemBlue.withAlphaComponent(0.06).cgColor)
                 ctx.fill(trackWash)
             }
         }
@@ -636,7 +636,7 @@ public final class PreemTimelineView: NSView {
         let height: CGFloat = Metrics.rulerHeight - 8
         let armLen: CGFloat = 6
         let dir: CGFloat = isIn ? 1 : -1
-        ctx.setStrokeColor(TimelinePalette.video.cgColor)
+        ctx.setStrokeColor(NSColor.systemBlue.cgColor)
         ctx.setLineWidth(2)
         ctx.setLineCap(.square)
         ctx.move(to: CGPoint(x: x, y: topY))
@@ -660,9 +660,9 @@ public final class PreemTimelineView: NSView {
             height: abs(currentPoint.y - startPoint.y)
         )
         guard rect.width > 1, rect.height > 1 else { return }
-        ctx.setFillColor(TimelinePalette.accent.withAlphaComponent(0.10).cgColor)
+        ctx.setFillColor(NSColor.systemYellow.withAlphaComponent(0.10).cgColor)
         ctx.fill(rect)
-        ctx.setStrokeColor(TimelinePalette.accent.withAlphaComponent(0.85).cgColor)
+        ctx.setStrokeColor(NSColor.systemYellow.withAlphaComponent(0.85).cgColor)
         ctx.setLineWidth(1)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
         ctx.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
@@ -713,7 +713,7 @@ public final class PreemTimelineView: NSView {
 
         // Snap-line: vertical highlight at the drop-time so the user can
         // line up with edit points / zero / other clips.
-        ctx.setStrokeColor(TimelinePalette.accent.withAlphaComponent(0.8).cgColor)
+        ctx.setStrokeColor(NSColor.systemYellow.withAlphaComponent(0.8).cgColor)
         ctx.setLineWidth(1.5)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
         ctx.move(to: CGPoint(x: startX, y: Metrics.rulerHeight))
@@ -729,7 +729,7 @@ public final class PreemTimelineView: NSView {
             drawGhostRect(
                 ctx: ctx,
                 rect: CGRect(x: startX, y: yV + 2, width: widthPx, height: Metrics.trackHeight - 4),
-                fill: TimelinePalette.video,
+                fill: NSColor.systemBlue,
                 label: ghost.source.name + "  (V)"
             )
         }
@@ -737,7 +737,7 @@ public final class PreemTimelineView: NSView {
             drawGhostRect(
                 ctx: ctx,
                 rect: CGRect(x: startX, y: yA + 2, width: widthPx, height: Metrics.trackHeight - 4),
-                fill: TimelinePalette.audio,
+                fill: NSColor.systemTeal,
                 label: ghost.source.name + "  (A)"
             )
         }
@@ -746,7 +746,7 @@ public final class PreemTimelineView: NSView {
         let timeLabel = formatRulerTime(ghost.startSeconds)
         let readoutAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: TimelinePalette.accent,
+            .foregroundColor: NSColor.systemYellow,
         ]
         let textSize = (timeLabel as NSString).size(withAttributes: readoutAttrs)
         let badgeRect = CGRect(
@@ -772,7 +772,7 @@ public final class PreemTimelineView: NSView {
             height: Metrics.trackHeight
         )
         // Dashed accent-tinted band for the phantom lane
-        ctx.setStrokeColor(TimelinePalette.accent.withAlphaComponent(0.85).cgColor)
+        ctx.setStrokeColor(NSColor.systemYellow.withAlphaComponent(0.85).cgColor)
         ctx.setLineWidth(1.5)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
         ctx.stroke(rect.insetBy(dx: 1, dy: 1))
@@ -780,7 +780,7 @@ public final class PreemTimelineView: NSView {
 
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-            .foregroundColor: TimelinePalette.accent,
+            .foregroundColor: NSColor.systemYellow,
         ]
         (label as NSString).draw(
             at: CGPoint(x: 10, y: yTop + (Metrics.trackHeight - 14) / 2),
@@ -1004,7 +1004,7 @@ public final class PreemTimelineView: NSView {
                 width: chipTextSize.width + 8,
                 height: chipTextSize.height + 2
             )
-            ctx.setFillColor(TimelinePalette.video.withAlphaComponent(0.85).cgColor)
+            ctx.setFillColor(NSColor.systemBlue.withAlphaComponent(0.85).cgColor)
             NSBezierPath(roundedRect: chipRect, xRadius: 3, yRadius: 3).fill()
             (name as NSString).draw(
                 at: CGPoint(x: chipRect.minX + 4, y: chipRect.minY + 1),
@@ -1029,14 +1029,14 @@ public final class PreemTimelineView: NSView {
         // Solo (only on audio)
         if !isVideo {
             let soloRect = CGRect(x: bx, y: buttonY, width: buttonSize, height: buttonSize)
-            drawHeaderButton(ctx: ctx, rect: soloRect, label: "S", active: isSolo, color: TimelinePalette.accent)
+            drawHeaderButton(ctx: ctx, rect: soloRect, label: "S", active: isSolo, color: .systemYellow)
             laidOutHeaderButtons.append(HeaderButton(rect: soloRect, kind: .solo, trackIsVideo: false, trackIndex: trackIndex))
             bx -= (buttonSize + spacing)
         }
 
         // Mute / Output toggle
         let muteRect = CGRect(x: bx, y: buttonY, width: buttonSize, height: buttonSize)
-        drawHeaderButton(ctx: ctx, rect: muteRect, label: "M", active: isMuted, color: TimelinePalette.playhead)
+        drawHeaderButton(ctx: ctx, rect: muteRect, label: "M", active: isMuted, color: .systemRed)
         laidOutHeaderButtons.append(HeaderButton(rect: muteRect, kind: .mute, trackIsVideo: isVideo, trackIndex: trackIndex))
 
         // Record the full lane-header band so a click outside the
@@ -1063,11 +1063,11 @@ public final class PreemTimelineView: NSView {
             // Gradient color: green → yellow → red based on level
             let fillColor: NSColor
             if clamped < 0.7 {
-                fillColor = TimelinePalette.green
+                fillColor = .systemGreen
             } else if clamped < 0.9 {
-                fillColor = TimelinePalette.accent
+                fillColor = .systemYellow
             } else {
-                fillColor = TimelinePalette.playhead
+                fillColor = .systemRed
             }
             ctx.setFillColor(fillColor.cgColor)
             ctx.fill(fillRect)
@@ -1145,9 +1145,9 @@ public final class PreemTimelineView: NSView {
         let w = gap.durationSeconds * pixelsPerSecond
         guard w > 0 else { return }
         let rect = CGRect(x: x, y: y + 2, width: CGFloat(w), height: Metrics.trackHeight - 4)
-        ctx.setFillColor(TimelinePalette.accent.withAlphaComponent(0.22).cgColor)
+        ctx.setFillColor(NSColor.systemYellow.withAlphaComponent(0.22).cgColor)
         ctx.fill(rect)
-        ctx.setStrokeColor(TimelinePalette.accent.withAlphaComponent(0.9).cgColor)
+        ctx.setStrokeColor(NSColor.systemYellow.withAlphaComponent(0.9).cgColor)
         ctx.setLineWidth(1.25)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
         ctx.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
@@ -1221,8 +1221,8 @@ public final class PreemTimelineView: NSView {
         let isCrossKind = (isAudioClip && floating.targetTrack.kind == 0) ||
                           (!isAudioClip && floating.targetTrack.kind == 1)
         let fillColor: NSColor = isCrossKind
-            ? TimelinePalette.playhead
-            : (isAudioClip ? TimelinePalette.audio : TimelinePalette.video)
+            ? .systemRed
+            : (isAudioClip ? .systemTeal : .systemBlue)
 
         ctx.setFillColor(fillColor.withAlphaComponent(0.55).cgColor)
         let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
@@ -1336,7 +1336,7 @@ public final class PreemTimelineView: NSView {
                 ctx.setFillColor(NSColor.white.withAlphaComponent(isCutSelected ? 0.85 : 0.18).cgColor)
                 ctx.fill(handle)
                 if isCutSelected {
-                    ctx.setStrokeColor(TimelinePalette.accent.cgColor)
+                    ctx.setStrokeColor(NSColor.systemYellow.cgColor)
                     ctx.setLineWidth(1.5)
                     ctx.stroke(handle.insetBy(dx: -3, dy: -3))
                 }
@@ -1356,12 +1356,12 @@ public final class PreemTimelineView: NSView {
 
             // Fill — selected wedge gets a strong tint so it's
             // obvious the user has clicked it (and can now hit Delete).
-            let baseFill = TimelinePalette.accent.withAlphaComponent(isCutSelected ? 0.55 : 0.18)
+            let baseFill = NSColor.systemYellow.withAlphaComponent(isCutSelected ? 0.55 : 0.18)
             ctx.setFillColor(baseFill.cgColor)
             ctx.fill(rect)
 
             // Crossed diagonals — the cross-dissolve glyph.
-            ctx.setStrokeColor(TimelinePalette.accent.withAlphaComponent(0.9).cgColor)
+            ctx.setStrokeColor(NSColor.systemYellow.withAlphaComponent(0.9).cgColor)
             ctx.setLineWidth(1.5)
             ctx.move(to: CGPoint(x: rect.minX, y: rect.minY))
             ctx.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
@@ -1370,7 +1370,7 @@ public final class PreemTimelineView: NSView {
             ctx.strokePath()
 
             // Outline — bumped 2px stroke when selected.
-            ctx.setStrokeColor(TimelinePalette.accent.withAlphaComponent(isCutSelected ? 1.0 : 0.55).cgColor)
+            ctx.setStrokeColor(NSColor.systemYellow.withAlphaComponent(isCutSelected ? 1.0 : 0.55).cgColor)
             ctx.setLineWidth(isCutSelected ? 2 : 0.75)
             ctx.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
 
@@ -1399,8 +1399,8 @@ public final class PreemTimelineView: NSView {
     private func drawClip(ctx: CGContext, rect: CGRect, placed: PlacedClip, isAudio: Bool) {
         let isSelected = selectedClipIDs.contains(placed.id)
         let baseFill: NSColor = isAudio
-            ? TimelinePalette.audioFill.withAlphaComponent(0.92)
-            : TimelinePalette.videoFill.withAlphaComponent(0.92)
+            ? NSColor.systemTeal.withAlphaComponent(0.55)
+            : NSColor.systemBlue.withAlphaComponent(0.7)
         let fill = isSelected ? baseFill.blended(withFraction: 0.25, of: .white) ?? baseFill : baseFill
         ctx.setFillColor(fill.cgColor)
         let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
@@ -1418,7 +1418,7 @@ public final class PreemTimelineView: NSView {
         ctx.restoreGState()
 
         if isSelected {
-            ctx.setStrokeColor(TimelinePalette.accent.cgColor)
+            ctx.setStrokeColor(NSColor.systemYellow.cgColor)
             ctx.setLineWidth(2)
         } else {
             ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.8).cgColor)
@@ -1448,12 +1448,12 @@ public final class PreemTimelineView: NSView {
             ctx.setFillColor(NSColor.white.withAlphaComponent(rightAlpha).cgColor)
             ctx.fill(rightHandle)
             if leftEdgeSelected {
-                ctx.setStrokeColor(TimelinePalette.accent.cgColor)
+                ctx.setStrokeColor(NSColor.systemYellow.cgColor)
                 ctx.setLineWidth(1.5)
                 ctx.stroke(leftHandle.insetBy(dx: -2, dy: -2))
             }
             if rightEdgeSelected {
-                ctx.setStrokeColor(TimelinePalette.accent.cgColor)
+                ctx.setStrokeColor(NSColor.systemYellow.cgColor)
                 ctx.setLineWidth(1.5)
                 ctx.stroke(rightHandle.insetBy(dx: -2, dy: -2))
             }
@@ -1586,7 +1586,7 @@ public final class PreemTimelineView: NSView {
         let isSelected = selectedClipEdge == edge
         let alpha: CGFloat = isSelected ? 0.95 : 0.55
         let handle = CGRect(x: x - 1.5, y: rect.minY + 2, width: 3, height: rect.height - 4)
-        ctx.setFillColor(TimelinePalette.accent.withAlphaComponent(alpha).cgColor)
+        ctx.setFillColor(NSColor.systemYellow.withAlphaComponent(alpha).cgColor)
         ctx.fill(handle)
     }
 
@@ -1606,9 +1606,9 @@ public final class PreemTimelineView: NSView {
             path.line(to: CGPoint(x: rect.minX, y: rect.midY))
             path.close()
         }
-        ctx.setFillColor(TimelinePalette.accent.withAlphaComponent(isSelected ? 0.55 : 0.22).cgColor)
+        ctx.setFillColor(NSColor.systemYellow.withAlphaComponent(isSelected ? 0.55 : 0.22).cgColor)
         path.fill()
-        ctx.setStrokeColor(TimelinePalette.accent.withAlphaComponent(isSelected ? 1.0 : 0.85).cgColor)
+        ctx.setStrokeColor(NSColor.systemYellow.withAlphaComponent(isSelected ? 1.0 : 0.85).cgColor)
         ctx.setLineWidth(isSelected ? 2 : 1)
         path.stroke()
         ctx.restoreGState()
@@ -1638,7 +1638,7 @@ public final class PreemTimelineView: NSView {
         let centerY = rect.midY
         let halfH = (rect.height - 6) / 2
 
-        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.85).cgColor)
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.65).cgColor)
         ctx.setLineWidth(1)
         ctx.setLineCap(.round)
 
