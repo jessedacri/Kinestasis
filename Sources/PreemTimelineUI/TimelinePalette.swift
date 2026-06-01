@@ -8,10 +8,17 @@ import AppKit
 /// red→playhead, green→green.
 enum TimelinePalette {
     static let accent   = NSColor(hex: "F0A030")   // marks, transitions, cut/fade affordances, selection
-    static let video    = NSColor(hex: "C084FC")   // video clip fills (was systemBlue)
-    static let audio    = NSColor(hex: "22D3EE")   // audio clip fills (was systemTeal)
+    static let video    = NSColor(hex: "C084FC")   // bright video hue (selection/borders)
+    static let audio    = NSColor(hex: "22D3EE")   // bright audio hue (selection/borders)
     static let playhead = NSColor(hex: "FF4757")   // playhead line + triangle (was systemRed)
     static let green    = NSColor(hex: "3FB950")
+
+    // Clip BODY fills: dark, hue-tinted cards so white waveforms / thumbnails
+    // read with full contrast (NLE convention — bright hues are for accents,
+    // not the whole clip body). Bright hue blended heavily toward the bg.
+    private static let deep = NSColor(hex: "18161B")
+    static let videoFill = video.blended(withFraction: 0.66, of: deep) ?? video
+    static let audioFill = audio.blended(withFraction: 0.66, of: deep) ?? audio
 }
 
 extension NSColor {

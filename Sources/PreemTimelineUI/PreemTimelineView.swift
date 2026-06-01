@@ -1399,8 +1399,8 @@ public final class PreemTimelineView: NSView {
     private func drawClip(ctx: CGContext, rect: CGRect, placed: PlacedClip, isAudio: Bool) {
         let isSelected = selectedClipIDs.contains(placed.id)
         let baseFill: NSColor = isAudio
-            ? TimelinePalette.audio.withAlphaComponent(0.55)
-            : TimelinePalette.video.withAlphaComponent(0.7)
+            ? TimelinePalette.audioFill.withAlphaComponent(0.92)
+            : TimelinePalette.videoFill.withAlphaComponent(0.92)
         let fill = isSelected ? baseFill.blended(withFraction: 0.25, of: .white) ?? baseFill : baseFill
         ctx.setFillColor(fill.cgColor)
         let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
@@ -1638,7 +1638,7 @@ public final class PreemTimelineView: NSView {
         let centerY = rect.midY
         let halfH = (rect.height - 6) / 2
 
-        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.65).cgColor)
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.85).cgColor)
         ctx.setLineWidth(1)
         ctx.setLineCap(.round)
 
