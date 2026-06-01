@@ -50,7 +50,19 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
     private let ioQueue = DispatchQueue(label: "polymerge.mxf.frame-source")
     private var vtSession: VTDecompressionSession?
     private var readHandle: FileHandle?
-    private var nextFrameIndex: Int = 0
+
+    // Decode-ahead pipeline (async VT). All-Intra H.264 / ProRes have no
+    // frame reordering, so VT outputs are keyed by frame index and consumed
+    // in order. Submitting several frames before consuming lets the Media
+    // Engine overlap decodes (sync one-at-a-time capped throughput at ~24fps;
+    // pipelining pushes well past real-time). All mutated on `ioQueue`.
+    private var consumeIndex = 0          // next index the consumer wants
+    private var readIndex = 0             // next index to read + submit
+    private var inFlight = 0              // submitted, awaiting callback
+    private var ready: [Int: PPEDecodedFrame] = [:]
+    private let maxAhead = 4
+    private var pendingCont: (index: Int, cont: CheckedContinuation<PPEDecodedFrame?, Error>)?
+    private var seekGen = 0               // bumped on seek/teardown; stale callbacks no-op
 
     enum CodecKind {
         case h264
@@ -165,13 +177,18 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
                     self.index.frames.count - 1,
                     Int((seconds * self.nominalFrameRate).rounded())
                 ))
-                self.nextFrameIndex = targetIdx
-                // H.264 bitstreams may require re-submitting SPS/
-                // PPS context on a non-keyframe jump. ProRes is
-                // intra-only so no flush needed.
-                if self.codec == .h264, let session = self.vtSession {
-                    VTDecompressionSessionFinishDelayedFrames(session)
+                // Invalidate in-flight async decodes (their callbacks become
+                // no-ops via the generation check), drain VT, and reset the
+                // pipeline to the new position.
+                self.seekGen += 1
+                if let session = self.vtSession {
+                    VTDecompressionSessionWaitForAsynchronousFrames(session)
                 }
+                self.ready.removeAll()
+                self.inFlight = 0
+                self.consumeIndex = targetIdx
+                self.readIndex = targetIdx
+                if let p = self.pendingCont { self.pendingCont = nil; p.cont.resume(returning: nil) }
                 cont.resume()
             }
         }
@@ -180,111 +197,116 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
     public func nextFrame() async throws -> PPEDecodedFrame? {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PPEDecodedFrame?, Error>) in
             ioQueue.async {
-                do {
-                    let frame = try self.decodeNextFrameSync()
-                    cont.resume(returning: frame)
-                } catch {
-                    cont.resume(throwing: error)
+                guard self.pendingCont == nil else {
+                    cont.resume(throwing: FrameSourceError.readFailed("concurrent nextFrame"))
+                    return
                 }
+                self.pendingCont = (index: self.consumeIndex, cont)
+                self.pump()
+                self.serviceWaiter()
             }
         }
     }
 
     public func tearDown() {
         ioQueue.async {
+            self.seekGen += 1
             if let s = self.vtSession {
+                VTDecompressionSessionWaitForAsynchronousFrames(s)
                 VTDecompressionSessionInvalidate(s)
                 self.vtSession = nil
             }
             try? self.readHandle?.close()
             self.readHandle = nil
+            self.ready.removeAll()
+            self.inFlight = 0
+            if let p = self.pendingCont { self.pendingCont = nil; p.cont.resume(returning: nil) }
         }
     }
 
-    // MARK: - Internals
+    // MARK: - Internals (decode-ahead pipeline; all on `ioQueue`)
 
-    /// Must be called on `ioQueue`. Blocks until VT returns
-    /// the decoded pixel buffer (synchronous decode — we use
-    /// a `DispatchSemaphore` to convert the callback to a
-    /// sync wait). Returns nil at EOF.
-    private func decodeNextFrameSync() throws -> PPEDecodedFrame? {
-        let idx = nextFrameIndex
-        if idx >= index.frames.count { return nil }
+    private func ensureResources() {
+        if readHandle == nil { readHandle = try? FileHandle(forReadingFrom: url) }
+        if vtSession == nil { vtSession = try? Self.makeDecompressionSession(formatDescription: formatDescription) }
+    }
+
+    /// Keep the VT pipeline filled up to `maxAhead` frames in flight +
+    /// decoded-but-unconsumed, reading + submitting frames asynchronously
+    /// so the Media Engine can overlap decodes.
+    private func pump() {
+        ensureResources()
+        guard vtSession != nil, readHandle != nil else { return }
+        while inFlight + ready.count < maxAhead && readIndex < index.frames.count {
+            let i = readIndex
+            readIndex += 1
+            submitFrame(i)
+        }
+    }
+
+    /// Read frame `idx` off disk and submit it to VT for async decode.
+    private func submitFrame(_ idx: Int) {
+        guard idx < index.frames.count, let handle = readHandle, let session = vtSession else { return }
         let ref = index.frames[idx]
+        let gen = seekGen
+        do {
+            try handle.seek(toOffset: ref.payloadOffset)
+            let len = Int(ref.payloadLength)
+            guard let raw = try handle.read(upToCount: len), raw.count == len else { return }
+            let pts = CMTime(value: Int64(idx) * Int64(frameRateDen), timescale: frameRateNum)
+            let duration = CMTime(value: Int64(frameRateDen), timescale: frameRateNum)
+            let sampleBuffer = try buildSampleBuffer(for: raw, pts: pts, duration: duration)
 
-        // Ensure the file handle + VT session are ready.
-        if readHandle == nil {
-            readHandle = try? FileHandle(forReadingFrom: url)
-        }
-        guard let handle = readHandle else {
-            throw FrameSourceError.readFailed("cannot open \(url.lastPathComponent)")
-        }
-        if vtSession == nil {
-            vtSession = try Self.makeDecompressionSession(
-                formatDescription: formatDescription
+            inFlight += 1
+            var infoFlags: VTDecodeInfoFlags = []
+            let flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression, ._1xRealTimePlayback]
+            let status = VTDecompressionSessionDecodeFrame(
+                session,
+                sampleBuffer: sampleBuffer,
+                flags: flags,
+                infoFlagsOut: &infoFlags,
+                outputHandler: { [weak self] status, _, imageBuffer, _, _ in
+                    guard let self else { return }
+                    self.ioQueue.async {
+                        guard gen == self.seekGen else { return }   // superseded by a seek/teardown
+                        self.inFlight -= 1
+                        if status == noErr, let image = imageBuffer {
+                            self.ready[idx] = PPEDecodedFrame(pts: pts, duration: duration, pixelBuffer: image)
+                        }
+                        self.serviceWaiter()
+                        self.pump()
+                    }
+                }
             )
+            if status != noErr { inFlight -= 1 }
+        } catch {
+            // I/O or sample-buffer error on this frame — skip it.
         }
-        guard let session = vtSession else {
-            throw FrameSourceError.readerSetupFailed("no VT session")
-        }
+    }
 
-        // Read the frame's bytes.
-        try handle.seek(toOffset: ref.payloadOffset)
-        guard let raw = try handle.read(upToCount: Int(ref.payloadLength)),
-              raw.count == Int(ref.payloadLength) else {
-            throw FrameSourceError.readFailed("short read at frame \(idx)")
+    /// Deliver the consumer's awaited frame once it's decoded, or nil at EOF
+    /// / on an unrecoverable miss.
+    private func serviceWaiter() {
+        guard let p = pendingCont else { return }
+        if let frame = ready.removeValue(forKey: p.index) {
+            consumeIndex = p.index + 1
+            pendingCont = nil
+            p.cont.resume(returning: frame)
+            return
         }
-
-        // Build a CMSampleBuffer per codec and submit to VT.
-        let pts = CMTime(
-            value: Int64(idx) * Int64(frameRateDen),
-            timescale: frameRateNum
-        )
-        let duration = CMTime(
-            value: Int64(frameRateDen),
-            timescale: frameRateNum
-        )
-        let sampleBuffer = try buildSampleBuffer(
-            for: raw,
-            pts: pts,
-            duration: duration
-        )
-
-        // Synchronous decode via semaphore+callback. VT can
-        // operate in async mode but we want one-frame-at-a-
-        // time semantics that match the `VideoFrameSource`
-        // protocol. Overhead is negligible vs. decode cost.
-        let box = DecodeResultBox()
-        let sem = DispatchSemaphore(value: 0)
-        var flagsOut: VTDecodeInfoFlags = []
-        let flagsIn: VTDecodeFrameFlags = [._1xRealTimePlayback]
-        let status = VTDecompressionSessionDecodeFrame(
-            session,
-            sampleBuffer: sampleBuffer,
-            flags: flagsIn,
-            infoFlagsOut: &flagsOut,
-            outputHandler: { status, _, imageBuffer, _, _ in
-                box.status = status
-                box.imageBuffer = imageBuffer
-                sem.signal()
-            }
-        )
-        if status != noErr {
-            throw FrameSourceError.readFailed("VT submit failed \(status) frame \(idx)")
+        if p.index >= index.frames.count {
+            pendingCont = nil
+            p.cont.resume(returning: nil)               // genuine EOF
+            return
         }
-        sem.wait()
-        guard box.status == noErr, let image = box.imageBuffer else {
-            throw FrameSourceError.readFailed(
-                "VT decode failed (\(box.status)) frame \(idx)"
-            )
+        if inFlight == 0 && readIndex > p.index {
+            // Submitted but never produced (decode failure) and nothing else
+            // in flight → don't hang the consumer.
+            pendingCont = nil
+            p.cont.resume(returning: nil)
+            return
         }
-
-        nextFrameIndex = idx + 1
-        return PPEDecodedFrame(
-            pts: pts,
-            duration: duration,
-            pixelBuffer: image
-        )
+        // Otherwise keep waiting — a callback or pump will make progress.
     }
 
     /// Build a CMSampleBuffer appropriate for the codec. H.264
@@ -487,11 +509,17 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferMetalCompatibilityKey as String: true,
         ]
+        // Explicitly request the hardware decoder (Apple Silicon Media
+        // Engine). Without this, 4K All-Intra H.264 can fall back to / pick
+        // a slower path that can't sustain 24 fps.
+        let decoderSpec: [String: Any] = [
+            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String: true,
+        ]
         var session: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             formatDescription: formatDescription,
-            decoderSpecification: nil,
+            decoderSpecification: decoderSpec as CFDictionary,
             imageBufferAttributes: attrs as CFDictionary,
             outputCallback: nil,
             decompressionSessionOut: &session
@@ -519,10 +547,3 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
     }
 }
 
-/// Output-handler escape hatch. VT's callback hands us both
-/// the status and the pixel buffer; we stash them here and
-/// signal a semaphore so the calling thread can continue.
-private final class DecodeResultBox {
-    var status: OSStatus = -1
-    var imageBuffer: CVImageBuffer?
-}

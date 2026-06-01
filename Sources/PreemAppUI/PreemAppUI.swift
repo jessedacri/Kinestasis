@@ -221,7 +221,7 @@ public struct PreemRootView: View {
                 workspace.jumpToEnd()
                 return nil
             case "i":
-                let sourceFocused = workspace.focusedViewer == .source && workspace.sourceClip != nil
+                let sourceFocused = workspace.sourceMarksActive
                 if isOption {
                     if sourceFocused { workspace.sourceInMark = nil }
                     else { workspace.clearProgramIn() }
@@ -237,7 +237,7 @@ public struct PreemRootView: View {
                 }
                 return nil
             case "o":
-                let sourceFocused = workspace.focusedViewer == .source && workspace.sourceClip != nil
+                let sourceFocused = workspace.sourceMarksActive
                 if isOption {
                     if sourceFocused { workspace.sourceOutMark = nil }
                     else { workspace.clearProgramOut() }
@@ -252,10 +252,17 @@ public struct PreemRootView: View {
                     else { workspace.setProgramOut() }
                 }
                 return nil
+            case "f", "F":
+                // Favorite the current source In/Out selection (FCP-style).
+                // Only when a source clip is the active mark target.
+                if workspace.sourceMarksActive {
+                    workspace.favoriteSourceSelection()
+                    return nil
+                }
+                return event
             case "x", "X":
                 if isOption {
-                    let sourceFocused = workspace.focusedViewer == .source && workspace.sourceClip != nil
-                    if sourceFocused { workspace.clearSourceMarks() }
+                    if workspace.sourceMarksActive { workspace.clearSourceMarks() }
                     else { workspace.clearProgramMarks() }
                     return nil
                 }

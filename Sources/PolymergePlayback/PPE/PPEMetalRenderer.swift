@@ -84,6 +84,13 @@ public final class PPEMetalRenderer {
     /// stays valid.
     private var lastDrawnFrame: PPEDecodedFrame?
 
+    /// Fired (on the main queue) the first time a fresh frame is drawn
+    /// after a generation reset (video change / seek). Lets a caller hold
+    /// a placeholder until real video is on screen, avoiding a cold-start
+    /// black flash. One-shot per reset.
+    public var onFirstFrameAfterReset: (() -> Void)?
+    private var firstFramePending = false
+
     private var displayLink: CVDisplayLink?
     private var displayLinkCallbackBox: Unmanaged<DisplayLinkWrapper>?
 
@@ -269,6 +276,7 @@ public final class PPEMetalRenderer {
         if let g = ctrl?.generation, g != lastSeenGeneration {
             lastSeenGeneration = g
             lastDrawnFrame = nil
+            firstFramePending = true
             CVMetalTextureCacheFlush(textureCache, 0)
         }
         let queueRef = ctrl?.frameQueue
@@ -278,6 +286,20 @@ public final class PPEMetalRenderer {
         if let frame = frameToShow {
             lastDrawnFrame = frame
             draw(frame: frame)
+            if firstFramePending {
+                // Only signal "ready" once we're actually showing the
+                // playback target region. After a seek (especially the
+                // reverse-lookahead seek, which lands ~1.25s early) the
+                // first post-reset frames are far from the target; firing
+                // here would flash that wrong area before catch-up. Holding
+                // until pts ≈ target keeps the placeholder over the gap.
+                let reachedTarget = target.map { CMTimeGetSeconds(frame.pts) >= $0 - 0.1 } ?? true
+                if reachedTarget {
+                    firstFramePending = false
+                    let cb = onFirstFrameAfterReset
+                    DispatchQueue.main.async { cb?() }
+                }
+            }
             if Self.debugLog { diagFramesThisSec &+= 1 }
         } else if Self.debugLog {
             diagNilThisSec &+= 1

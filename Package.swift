@@ -117,5 +117,10 @@ let package = Package(
             name: "PreemMediaTests",
             dependencies: ["PreemMedia"]
         ),
+
+        .testTarget(
+            name: "PreemRenderTests",
+            dependencies: ["PreemRender", "PreemCore"]
+        ),
     ]
 )

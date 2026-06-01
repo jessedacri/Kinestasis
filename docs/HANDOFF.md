@@ -1,6 +1,6 @@
 # Preem — Handoff Notes
 
-Snapshot for the next session. Last updated 2026-05-29. Pairs with `CLAUDE.md` (developer guide), `ARCHITECTURE.md` (load-bearing decisions), `TIMELINE.md` (editing patterns), `COMPOSITOR.md` (playback + render runtime), `ROADMAP.md` (milestones), `APPLE-SILICON.md` (API matrix).
+Snapshot for the next session. Last updated 2026-05-29. Pairs with `CLAUDE.md` (developer guide), `ARCHITECTURE.md` (load-bearing decisions), `TIMELINE.md` (editing patterns), `BROWSER.md` (bin / skimming / favorites), `COMPOSITOR.md` (playback + render runtime), `ROADMAP.md` (milestones), `APPLE-SILICON.md` (API matrix).
 
 ## Where things stand
 
@@ -58,25 +58,53 @@ Order:
 1. `CLAUDE.md` — tech stack, module layout, build commands, conventions.
 2. `ARCHITECTURE.md` — data model, module dependency graph, project-file format.
 3. `TIMELINE.md` — every user-facing editing pattern: tools, keymap, drag/drop, snapping, selection types, V/A linking, no-overlap invariant, undo batching, frame quantization, zoom, preview cache, focus model, In/Out marks.
-4. `COMPOSITOR.md` — runtime architecture: playback state machine, audio pipelines, **realtime compositor**, transitions (cross-dissolve + solo fade), pre-render cache, transform/crop, keyframe sampling, timecode.
-5. `ROADMAP.md` — what's in M1 → M6+.
-6. `APPLE-SILICON.md` — which Apple API for which job, and why.
+4. `BROWSER.md` — FCP-style bin: filmstrip skimming, still-vs-PPE source viewer state machine, `SkimFrameProvider`, favorites/subclips + filter, transport/marks routing.
+5. `COLOR.md` — Lumetri-style grading: Basic Correction + Curves, the color-managed per-layer compositor pipeline, `ColorGrade` model, color-management roadmap.
+6. `COMPOSITOR.md` — runtime architecture: playback state machine, audio pipelines, **realtime compositor**, transitions (cross-dissolve + solo fade), pre-render cache, transform/crop, keyframe sampling, timecode.
+7. `ROADMAP.md` — what's in M1 → M6+.
+8. `APPLE-SILICON.md` — which Apple API for which job, and why.
 
-## NEXT SESSION — Bins, "selects," and FCP-style skimming (user's priority)
+## 2026-05-29 (second push) — FCP-style filmstrip bin + skimming + favorites (DONE)
 
-The next focus is bin behavior and the **selects** workflow, moving toward Final Cut Pro: **skim** a clip by moving the mouse across its row/thumbnail in the bin and see it live in the Source viewer (no click, no play), plus mark/rate "selects" and pull them.
+The bin is now an FCP-style media browser. Shipped this session:
 
-**Good news — the render pipeline already supports frame seeks**, so skimming is mostly a bin-side gesture that writes the source playhead. Data flow that already works:
-`workspace.sourceTimeSeconds` (published) → `ViewerPane` re-render → `SourcePPEHost.updateNSView` → `Coordinator.push(clip:sourceTimeSeconds:isPlaying:)` → `CustomVideoPlayer.update(secondsInVideo:)` → decoder seeks → renderer pulls the frame. So setting `sourceClip` + `sourceTimeSeconds` during hover renders that frame automatically.
+- **Filmstrip rows.** `BinBrowserView` master clips render as horizontal filmstrips (`FilmstripClipRow` → `Filmstrip`, a `Canvas` that tiles the existing `ClipPreviewCache` thumbnails edge-to-edge at the source's natural aspect; audio-only clips get a `WaveformStrip`). The compact text `ClipRow` is gone. Thumbnails reuse `previewCache.ensureThumbnails` (kicked on `.onAppear`) and re-render off `previewVersion`.
+- **Skim.** `.onContinuousHover` over a filmstrip maps cursor-x → fraction → `workspace.skimSource(to:seconds:)`, which sets `sourceClip` (if changed) + `sourceTimeSeconds` WITHOUT the load reset, so the Source viewer follows the cursor live. A white skimmer line on the active row reflects `sourceTimeSeconds`. The old passive `ViewerPane.onChange(of: clip?.id)` reset was removed; clicking a clip now goes through `workspace.loadSourceClip(_:)` (the only path that resets playhead/marks/playback).
+- **Mark In/Out on the skimmer.** `sourceMarksActive` is true when the source viewer OR the bin is focused with a `sourceClip` — so I/O (and ⌥I/⌥O clear, ⌥X clear-both) now mark the skimmed bin clip, not just the source viewer. The In/Out selection draws as an accent band on the active filmstrip.
+- **F = favorite the selection.** New `f`/`F` key → `workspace.favoriteSourceSelection()` creates a `FavoriteRange` (subclip) from the current In/Out (full clip if unmarked) and clears the marks so the next one starts fresh. Many favorites per clip. Favorites draw as yellow bands on the parent filmstrip + a ★count badge.
+- **Favorites filter.** Header toggle (`All` / `★ Favorites`, bound to `workspace.binFilter: BinFilter`). The Favorites view lists every favorite across all clips as its own `FavoriteClipRow` — a sub-range filmstrip you can skim, drag to the timeline (payload `clipID|start|dur`, same as a marked source drag), or right-click → Remove Favorite.
 
-**Concrete plan:**
-1. **Skim gesture in the bin.** `ClipRow` (`BinBrowserView.swift:143`) has click/drag but no hover. Add a `GeometryReader` + continuous-hover (NSTrackingArea via an `NSViewRepresentable`, or SwiftUI `.onContinuousHover`) to map cursor-x → fraction → `sourceTime = frac * clip.duration`. On hover: set `workspace.sourceClip = clip` (if not already) and `workspace.sourceTimeSeconds = sourceTime`. On hover-exit: optionally restore the clicked clip's position. Throttle/coalesce if mouseMoved floods (it fires ~5–10ms).
-   - FCP detail to decide: skimming should preview WITHOUT committing the selection (or commit a "skimmed" clip distinct from the "opened" clip). Consider a separate `skimClip`/`skimTime` vs the persistent `sourceClip` so leaving the bin restores what was open.
-   - Audio: FCP plays "skimming audio." Optional v2 — start muted (video-only skim) to avoid audio-engine thrash on every pixel.
-2. **Selects / ratings — needs a data-model addition.** `ClipSource` (`MediaPool.swift:28`) has NO rating/favorite/keyword fields. Add e.g. `rating: Int` (0=none, +1 favorite, -1 reject — FCP uses favorite/reject ranges) and/or `keywords: [String]`, persist in the project JSON (Codable, give defaults for back-compat with old files — mirror how `Interpolation.easeIn/easeOut` were added). Then: bin UI to set favorite/reject (F / Delete keys in FCP), filter the bin by rating, and "pull selects" = a filtered view or a smart collection.
-3. **Bin behavior toward FCP:** marked In/Out on a skimmed/source clip already feed `insertFromSource` / `overwriteFromSource` (`WorkspaceModel.swift:1394`). Consider FCP's "favorites as sub-ranges" later; start with whole-clip ratings.
+**Data model:** `PreemCore/MediaPool.swift` gained `FavoriteRange` (`id`, `range: TimeRange`, `name`, `rating: .favorite|.rejected`) and `ClipSource.favorites: [FavoriteRange]`. ClipSource got a **custom `init(from:)`** that `decodeIfPresent`s `favorites` (→ `[]`) so projects saved before favorites still load — covered by `Tests/PreemCoreTests/FavoriteRangeTests.swift` (round-trip + missing-key back-compat). `RationalTime(seconds:scale:)` convenience added (scale defaults to 600).
 
-Key files for this work: `BinBrowserView.swift` (rows, gestures, `orderedClips` at ~:107), `ViewerPane.swift` (Source pane + `ScrubBar` + `SourcePPEHost` at :309), `WorkspaceModel.swift` (`sourceClip` :16, `sourceTimeSeconds` :75, source marks :76–77, `nudgeSourcePlayhead` :1363, `setSourceIn/Out` :1373), `CustomVideoPlayer.swift` (`update(secondsInVideo:)` :177 — the seek entry point), `PreemCore/MediaPool.swift` (`ClipSource` :28 — add rating fields here).
+**Verified:** debug + release builds clean; 30 unit tests pass; app smoke-launches without crash. **Interactive skim/favorite gestures were NOT manually tested with footage** — that's the first thing to confirm next session (skim a 4K clip, mark In/Out, press F, flip to the Favorites filter, drag a favorite to the timeline).
+
+### Skim performance — decoupled from the playback decoder (2026-05-29, follow-up)
+
+First cut drove skimming through the PPE playback decoder (`CustomVideoPlayer` → `AVAssetReader`), which is built for *sequential* decode: every hover tick re-seeded the reader and the cold reader showed black on first hover. Fixed by reserving PPE for actual playback and serving skim/scrub/paused frames from a fast still generator:
+
+- **`PreemMedia/SkimFrameProvider.swift`** — a single reused `AVAssetImageGenerator` (random-access friendly, async, cancelable), request coalescing (`cancelAllCGImageGeneration` + a monotonic token so only the latest decode is delivered), an LRU `CGImage` cache (256 frames, 0.05s buckets), and `bestAvailable(...)` which returns the exact cached frame → nearest cached → **nearest low-res thumbnail** so the viewer is never black. `maximumSize` height 720, tolerance 0.12s for snappy decode. Lives on `WorkspaceModel.skimProvider`; cleared alongside `previewCache`.
+- **`ViewerPane` source viewer is now two layers.** `SourceStillView` (a `StillLayerView` setting `layer.contents` to the generated `CGImage`) shows the frame whenever paused/skimming/scrubbing — instant thumbnail seed, then upgrades to the sharp decode. `SourcePPEHost` is visible (`opacity`) **only while playing**. `SourceStillView` skips all work when `active == false` (playing).
+- **PPE no longer thrashes when paused.** `SourcePPEHost.Coordinator.push` only calls `player.update` when `isPlaying` (plus once on the play→stop transition to freeze the last frame). While paused it stays quiet — no per-tick `AVAssetReader` re-seed. PPE spins up on Play (current time), seeks once, plays.
+
+Net: skim shows an instant (thumbnail) frame, sharpens within ~tens of ms, and re-visited positions are cache-instant. Cross-clip skim swaps the generator (cancels the prior clip's in-flight decode).
+
+**Hardware note:** both decode paths already use the Apple Silicon media engines — `AVAssetReader` wraps a VTDecompressionSession (Metal-compatible output, hardware decode), and `AVAssetImageGenerator` is hardware-accelerated too. The skim bottleneck was never decode horsepower; it was `AVAssetReader`'s rebuild-per-seek (no random access). Proxies are NOT required for smooth skim — the generator gets us there on the same hardware.
+
+**Three follow-up fixes (same session):**
+- **PPE mounts ONLY while playing.** `ViewerPane` conditionally includes `SourcePPEHost` on `sourceIsPlaying`, so skimming/scrubbing never creates/tears-down a Metal renderer + CVDisplayLink (the cross-clip skim hitch). Paused/skim is purely the still layer.
+- **Play-after-skim works.** Hovering a bin filmstrip now sets `focusedViewer = .source` (was `.bin`), so Space / J-K-L / I-O / F act on the skimmed clip. (Was routing transport to the program.)
+- **No play-start black flash.** `PPEMetalRenderer.onFirstFrameAfterReset` (new, fork) fires on the main queue the first time a fresh frame draws after a generation reset. `ViewerPane` holds the still over PPE (`sourcePlaybackReady`) from play-start until that fires; a 1s safety net reveals anyway if a decode never lands. `SourceStillView` is gated `active = !playing` so it freezes the play-start frame instead of regenerating.
+
+**Verify interactively:** skim (instant, no black, no lag) → press Space (plays from skim position, still holds until video lands) → I/O/F on the skimmed clip.
+
+**Known follow-ups for the bin:**
+- **Skim sharpness on heavy 4K.** Sharp decode is capped at 720px, 0.12s tolerance — fast, but heavy 4K H.264 still pays a GOP decode for the sharp frame (thumbnail seed covers the gap). Tunable; proxies would only be a "nice to have," not a requirement.
+- **Source playback doesn't advance `sourceTimeSeconds`** (pre-existing) — the scrub bar / filmstrip skimmer line don't move during source *playback*. Separate from skim; worth wiring a source playhead clock.
+- **`.id(clip.id)` PPE remount on clip switch** now only affects *playback* (per-clip), never skim. Low priority.
+- **Favorites as bins/folders.** User asked for "filtered OR in a folder" — the filter shipped; folders = real `Bin` nesting in the media pool (`BinItem.bin` exists but the UI is flat). Smart collections by rating/keyword would build on this.
+- **Reject rating + keyword tagging.** `FavoriteRange.Rating.rejected` exists in the model but no key binding/UI yet (FCP uses Delete on a selection to reject). Keywords aren't modeled.
+
+Key files: `BinBrowserView.swift` (rewritten — `FilmstripClipRow`, `FavoriteClipRow`, `Filmstrip`, `WaveformStrip`, filter toggle), `WorkspaceModel.swift` (`loadSourceClip`/`skimSource` ~:1390, `favoriteSourceSelection`/`removeFavorite`/`renameFavorite` ~:1430, `sourceMarksActive` ~:117, `binFilter` ~:97), `PreemAppUI.swift` (I/O routing via `sourceMarksActive`, new `f`/`F` case ~:255), `FocusedViewer.swift` (`BinFilter` enum), `PreemCore/MediaPool.swift` (`FavoriteRange` + `ClipSource.favorites` + custom decode).
 
 ## Other backlog (recommended order)
 
@@ -133,6 +161,27 @@ A full cleanliness/perf audit ran after the M3 keyframe push. Beyond the choppin
 - **Project is now a git repo** (`main` + the audit work). `themarket.mp4` is gitignored (large test footage).
 
 Media is streamed, not RAM-resident: each source clip is decoded on demand through an `AVAssetFrameSource` (AVAssetReader + VideoToolbox); seek = tear down + rebuild the reader at the new time. The only live-path caching is one warm decoder + one held frame per source.
+
+## MXF support (2026-05-30)
+
+AVFoundation can't open MXF, but PPE has a native demuxer (`MXFFrameSource`, Canon XF-AVC / Sony XAVC / ARRI ProRes-in-MXF). MXF is now routed to it at all three decode points:
+- **Import probe** — `MediaProber.probeMXF` uses `MXFFrameSource.load` (dims/fps/duration) + `MXFSoundDescriptorReader.readAll` (audio channels). Verified on real Canon footage (3840×2160 23.976 219s 4ch, ~1.7s index scan). Previously MXF imported with empty tracks (unusable).
+- **Compositor (program + export)** — `frameSources` is now typed `VideoFrameSource`; `ensureFrameSource` branches `.mxf → MXFFrameSource.load`.
+- **Source viewer still/skim** — `SkimFrameProvider` decodes MXF stills via a cached `MXFFrameSource` + `CIContext→CGImage` (serialized, latest-wins), since `AVAssetImageGenerator` can't open MXF. PPE already handled MXF *playback* in the source viewer.
+
+**Decode throughput — fixed (2026-05-30).** Real Canon footage is **4K All-Intra** H.264 (every frame IDR). `MXFFrameSource` originally decoded synchronously one-frame-at-a-time → measured **23.5 fps** (under the 23.976 needed) → constant drops. Rewrote the decode loop as an **async VT decode-ahead pipeline** (submit up to `maxAhead=4` frames so the Media Engine overlaps decodes; all-Intra → no reordering, frames keyed by index, generation counter discards post-seek callbacks). Now **~54 fps** — comfortably real-time for the source viewer (PPE) and the compositor pull path. Explicit `EnableHardwareAcceleratedVideoDecoder` hint added too. (`MXFFrameSource.swift` — `pump`/`submitFrame`/`serviceWaiter`.)
+
+**Filmstrip — fixed.** `ClipPreviewCache.generateMXFThumbnails` decodes evenly-spaced frames via `MXFFrameSource` + Core Image (AVAssetImageGenerator can't open MXF).
+
+**Native MXF audio — DONE (2026-05-31).** `ClipAudioLoader.decode` branches `.mxf → MXFAudioExtractor.extract` (native KLV PCM demux → per-channel Float, off-actor), preserving **all native channels** (verified: Canon = 4 discrete mono, 48 kHz, non-silent) with no temp WAV / transcode. Sample rate conformed to the engine rate only if it differs (`conform`, AVAudioConverter); 48 kHz → pass-through. Channels flow through the existing N-channel `TrackBuffer` path → summed to the stereo monitor (per-channel mute/solo already in the engine for future routing UI). `VideoAudioExtractor.extractMXFAndWriteWAV` is unrelated (a separate camera-audio→WAV workflow) and unused for playback.
+  - **Ranged/streaming audio — DONE (2026-05-31).** `MXFAudioReader` (in `MXFAudioExtractor.swift`) builds the sound-packet index ONCE (cached per URL, holds a file handle) and `decodeRange(startFrame:frameCount:)` reads + decodes only the packets covering the span. `ClipAudioLoader.loadRange` (+ an LRU range cache) routes the **timeline** pipeline (`TimelineAudioPipeline.buildBuffer`) to decode just each clip's trimmed span. Measured: index open ~0.15–1.7s (once), 10s span ≈ **0.7s** (was ~12s whole-track). The **source viewer** still whole-decodes via the same cached reader (`decodeMXF` → `decodeRange(0, total)`) — fine for preview; a windowed source decode is the remaining nicety.
+  - **Shared single-walk index — DONE (2026-06-01).** `MXFEssenceReader` now caches the combined picture+sound `ExtendedIndex` per URL (keyed by size+mtime, LRU 16); `scanIndex` delegates to `scanAudioIndex`. So import/compositor/source/audio share ONE file walk instead of each re-scanning. Verified: cold walk 1.75s, subsequent video/audio index lookups ~0ms.
+  - **Windowed source-viewer audio — DONE (2026-06-01).** `SourceAudioPipeline` decodes only a 60s window around the play position for MXF (via `loadRange`), rebuilding on out-of-window seeks; non-MXF keeps the whole-clip buffer. So source-viewer MXF audio starts fast instead of whole-track decode.
+  - **Skipped: batched packet reads.** Sound essence is frame-wrapped and interleaved with (large 4K) video, so packets for one track are ~1 video-frame apart on disk — reading contiguous spans would pull MBs of video between them (worse I/O). The cost is seek latency, not throughput; ranged + cached decode already covers it. A per-content-package read (all tracks' sound packets of one frame are contiguous) could cut seeks ~4× if ever needed.
+
+**Remaining MXF gaps (follow-ups):**
+- **Redundant index scans** — import, source-still, compositor, and thumbnails each `MXFFrameSource.load` (≈1.7s index scan for the 10GB file) independently. A shared index cache keyed by URL would cut startup cost.
+- **All-Intra assumption** — `buildSampleBuffer` marks every frame a keyframe; correct for this footage (verified IDR-only) but **Long-GOP XF-AVC would need real keyframe detection + seek-to-keyframe** (the index has no frame-type info yet).
 
 ## Known gotchas / footguns
 
@@ -217,11 +266,11 @@ Media is streamed, not RAM-resident: each source clip is decoded on demand throu
 
 ## State pointer
 
-- **App version**: M2 complete + most of M3 shipped. Playback engine hardened across 2026-05-28/29 (see playback sections above). **Next session: bins / selects / FCP-style skimming** (top section). Remaining backlog: cache↔live boundary micro-hiccup (tightening), multi-track audio export, proxy pipeline, bezier handles, rotated overlay chrome, keymap presets, `.preem` package, render-graph fusion.
+- **App version**: M2 complete + most of M3 shipped. Playback engine hardened across 2026-05-28/29. **FCP-style filmstrip bin + skimming + favorites shipped 2026-05-29 (second push)** — see that section above; needs interactive footage verification. Remaining backlog: bin follow-ups (proxy-backed skim, persistent skim host, folders/smart collections, reject+keywords), cache↔live boundary micro-hiccup (tightening), multi-track audio export, proxy pipeline, bezier handles, rotated overlay chrome, keymap presets, `.preem` package, render-graph fusion.
 - **Git**: `main` holds everything. Worktree clean. Repo created 2026-05-28; `themarket.mp4` gitignored (large test footage).
 - **Polymerge**: forked in-tree on 2026-05-27. No external dep.
 - **Debug log**: `/tmp/preem-debug.log`. `PreemDebugLog.log(...)` wired into critical paths. Check it first when something behaves weird. Encoder heartbeat is `[Encoder] video N/M audio M/X @ Y fps`. (All the temporary playback telemetry from the 05-29 hunt has been removed.)
-- **Build**: `swift build -c release && swift run -c release Preem` for any real footage work. 27 unit tests (`swift test`), all passing.
+- **Build**: `swift build -c release && swift run -c release Preem` for any real footage work. 30 unit tests (`swift test`), all passing.
 - **Playback chop**: SOLVED (frame-boundary source sampling + WYSIWYG decoupling). One known polish item left: the cache↔live boundary micro-hiccup.
 
 Good luck. If something feels weird, check the debug log, then re-read `TIMELINE.md` (editing question) or `COMPOSITOR.md` (playback / render question).

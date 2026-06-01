@@ -18,6 +18,14 @@ struct ViewerPane: View {
     let clip: ClipSource?
     @ObservedObject var workspace: WorkspaceModel
 
+    /// While paused, show the still layer (skim/scrub) vs. let the PPE
+    /// player hold its last frame frozen. Pausing freezes PPE (seamless,
+    /// no blur pop); moving the playhead (skim/scrub) flips to the still.
+    @State private var showStillWhenPaused = true
+    /// `sourceTimeSeconds` captured at the moment of pause — any change
+    /// from it while paused means the user is skimming/scrubbing.
+    @State private var pauseBaseline: Double = -1
+
     var body: some View {
         VStack(spacing: 0) {
             tabBar
@@ -28,6 +36,8 @@ struct ViewerPane: View {
                     sourceBody
                 case .effectControls:
                     EffectControlsContent(workspace: workspace)
+                case .color:
+                    ColorPanelContent(workspace: workspace)
                 }
             }
         }
@@ -36,10 +46,33 @@ struct ViewerPane: View {
         .onTapGesture {
             workspace.focusedViewer = .source
         }
-        .onChange(of: clip?.id) { _, _ in
-            workspace.sourceTimeSeconds = 0
-            workspace.clearSourceMarks()
-            workspace.stopSource()
+        .onChange(of: workspace.sourceIsPlaying) { _, playing in
+            if playing {
+                if showStillWhenPaused {
+                    // The still was the visible surface (skim/scrub), so PPE
+                    // must load/seek to the new position — hold the still over
+                    // its cold spin-up until the first frame lands.
+                    workspace.sourcePlaybackReady = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        if workspace.sourceIsPlaying { workspace.sourcePlaybackReady = true }
+                    }
+                } else {
+                    // Resume from a frozen pause: PPE already holds the exact
+                    // frame + buffered frames, so reveal it immediately — no
+                    // hold, no lag.
+                    workspace.sourcePlaybackReady = true
+                }
+            } else {
+                // Pause: freeze PPE on its last frame (no still pop). The
+                // still only takes over once the user moves the playhead.
+                showStillWhenPaused = false
+                pauseBaseline = workspace.sourceTimeSeconds
+            }
+        }
+        .onChange(of: workspace.sourceTimeSeconds) { _, t in
+            if !workspace.sourceIsPlaying && t != pauseBaseline {
+                showStillWhenPaused = true
+            }
         }
     }
 
@@ -62,6 +95,9 @@ struct ViewerPane: View {
                         .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
                         .foregroundStyle(.secondary)
                 }
+            }
+            tabButton(title: "Color", tab: .color) {
+                EmptyView()
             }
             Spacer()
             if workspace.sourcePaneTab == .source, let clip {
@@ -111,17 +147,57 @@ struct ViewerPane: View {
         }
     }
 
+    /// Still on top covers PPE when opacity 1. While playing it's held
+    /// until PPE's first frame; while paused it shows only for skim/scrub.
+    private var stillOpacity: Double {
+        if workspace.sourceIsPlaying {
+            return workspace.sourcePlaybackReady ? 0 : 1
+        }
+        return showStillWhenPaused ? 1 : 0
+    }
+
+    private var ppeOpacity: Double {
+        if workspace.sourceIsPlaying { return 1 }
+        return showStillWhenPaused ? 0 : 1
+    }
+
+    /// Only run the image generator when the still is actually the visible
+    /// paused surface — not during playback or paused-frozen.
+    private var stillActive: Bool {
+        !workspace.sourceIsPlaying && showStillWhenPaused
+    }
+
     private var sourceBody: some View {
         VStack(spacing: 0) {
             ZStack {
                 Color.black
                 if let clip, !clip.videoTracks.isEmpty {
+                    // PPE is PERSISTENT (mounted whenever a video clip is
+                    // loaded), not remounted per play/pause — so transitions
+                    // don't churn a Metal renderer + display link. It is
+                    // driven (decodes) ONLY while playing (push is gated), so
+                    // skim/scrub never seed the decoder. On pause it freezes
+                    // its last frame; the still only takes over when the user
+                    // moves the playhead.
                     SourcePPEHost(
                         clip: clip,
                         sourceTimeSeconds: workspace.sourceTimeSeconds,
-                        isPlaying: workspace.sourceIsPlaying
+                        isPlaying: workspace.sourceIsPlaying,
+                        onFirstFrame: { workspace.sourcePlaybackReady = true }
                     )
-                    .id(clip.id)
+                    .opacity(ppeOpacity)
+
+                    // Still layer: skim/scrub frames (fast image generator)
+                    // and the play-start hold (covers PPE's cold spin-up).
+                    SourceStillView(
+                        clip: clip,
+                        seconds: workspace.sourceTimeSeconds,
+                        active: stillActive,
+                        provider: workspace.skimProvider,
+                        thumbnails: workspace.previewCache.thumbnails(for: clip.id)?.images ?? []
+                    )
+                    .opacity(stillOpacity)
+                    .allowsHitTesting(false)
                 } else if clip != nil {
                     Image(systemName: "waveform")
                         .font(.system(size: 28))
@@ -310,18 +386,21 @@ private struct SourcePPEHost: NSViewRepresentable {
     let clip: ClipSource
     let sourceTimeSeconds: Double
     let isPlaying: Bool
+    var onFirstFrame: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> PPEHostView {
         let view = PPEHostView()
         view.attach(renderer: context.coordinator.renderer)
+        context.coordinator.onFirstFrame = onFirstFrame
         context.coordinator.start()
         context.coordinator.push(clip: clip, sourceTimeSeconds: sourceTimeSeconds, isPlaying: isPlaying)
         return view
     }
 
     func updateNSView(_ nsView: PPEHostView, context: Context) {
+        context.coordinator.onFirstFrame = onFirstFrame
         context.coordinator.push(clip: clip, sourceTimeSeconds: sourceTimeSeconds, isPlaying: isPlaying)
     }
 
@@ -335,6 +414,8 @@ private struct SourcePPEHost: NSViewRepresentable {
         let player = CustomVideoPlayer()
         private var cachedVideo: VideoFile?
         private var cachedClipID: ClipID?
+        private var wasPlaying = false
+        var onFirstFrame: (() -> Void)?
 
         init() {
             do {
@@ -343,6 +424,12 @@ private struct SourcePPEHost: NSViewRepresentable {
                 fatalError("PPEMetalRenderer init failed: \(error)")
             }
             renderer.controller = player
+            // Renderer fires this on the main queue (see its
+            // DispatchQueue.main.async) — assume isolation to reach the
+            // main-actor Coordinator without a Task hop.
+            renderer.onFirstFrameAfterReset = { [weak self] in
+                MainActor.assumeIsolated { self?.onFirstFrame?() }
+            }
         }
 
         func start() {
@@ -359,13 +446,33 @@ private struct SourcePPEHost: NSViewRepresentable {
             // For source viewer, absoluteSeconds == sourceTimeSeconds (it's
             // not part of a timeline). PPE uses it for host-time
             // interpolation between updates.
-            player.update(
-                video: video,
-                secondsInVideo: max(0, sourceTimeSeconds),
-                absoluteSeconds: sourceTimeSeconds,
-                isPlaying: isPlaying,
-                rate: isPlaying ? 1 : 0
-            )
+            //
+            // Only drive the playback decoder when actually playing. While
+            // paused / skimming / scrubbing the still layer shows the frame
+            // (via SkimFrameProvider), so we must NOT push new times here —
+            // that would re-seed the AVAssetReader on every hover tick and
+            // starve the image generator (the laggy/black-frame behavior).
+            // We push exactly once when playback stops so PPE freezes on the
+            // current frame, then go quiet until the next play.
+            if isPlaying {
+                player.update(
+                    video: video,
+                    secondsInVideo: max(0, sourceTimeSeconds),
+                    absoluteSeconds: sourceTimeSeconds,
+                    isPlaying: true,
+                    rate: 1
+                )
+                wasPlaying = true
+            } else if wasPlaying {
+                player.update(
+                    video: video,
+                    secondsInVideo: max(0, sourceTimeSeconds),
+                    absoluteSeconds: sourceTimeSeconds,
+                    isPlaying: false,
+                    rate: 0
+                )
+                wasPlaying = false
+            }
         }
 
         private func videoFile(for clip: ClipSource) -> VideoFile? {
@@ -388,5 +495,52 @@ private struct SourcePPEHost: NSViewRepresentable {
             cachedClipID = clip.id
             return video
         }
+    }
+}
+
+/// Still-frame display for the source viewer when paused / skimming /
+/// scrubbing. Draws a `CGImage` from `SkimFrameProvider` into a layer:
+/// first the instant best-available frame (cached or nearest thumbnail —
+/// never black), then upgrades to the sharp decoded frame when it arrives.
+private struct SourceStillView: NSViewRepresentable {
+    let clip: ClipSource
+    let seconds: Double
+    let active: Bool
+    let provider: SkimFrameProvider
+    let thumbnails: [CGImage]
+
+    func makeNSView(context: Context) -> StillLayerView {
+        let v = StillLayerView()
+        refresh(v)
+        return v
+    }
+
+    func updateNSView(_ v: StillLayerView, context: Context) {
+        refresh(v)
+    }
+
+    private func refresh(_ v: StillLayerView) {
+        // Hidden during playback (PPE is on top); skip generation entirely.
+        guard active else { return }
+        if let immediate = provider.bestAvailable(clip: clip, seconds: seconds, thumbnails: thumbnails) {
+            v.setImage(immediate)
+        }
+        provider.requestSharp(clip: clip, seconds: seconds) { [weak v] sharp in
+            v?.setImage(sharp)
+        }
+    }
+}
+
+final class StillLayerView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.contentsGravity = .resizeAspect
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    func setImage(_ img: CGImage) {
+        layer?.contents = img
     }
 }

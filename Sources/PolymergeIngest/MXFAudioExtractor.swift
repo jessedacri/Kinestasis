@@ -206,7 +206,7 @@ public struct MXFAudioExtractor {
     /// into Float samples ([-1, 1]), appending per-channel.
     /// Handles 16 / 24 / 32 bit widths — the sizes linear-PCM
     /// MXFs actually use in the wild.
-    private static func decodePCM(
+    fileprivate static func decodePCM(
         data: Data,
         bytesPerSample: Int,
         channels: Int,
@@ -263,5 +263,121 @@ public struct MXFAudioExtractor {
                 break
             }
         }
+    }
+}
+
+/// Random-access MXF audio reader. Builds the sound-packet index ONCE
+/// (the expensive full-file KLV walk) and holds an open file handle, then
+/// serves `decodeRange` requests that read + decode ONLY the packets
+/// covering the requested sample span. This is what makes a bin of long
+/// MXF clips usable — a trimmed timeline clip decodes its span (≈ms),
+/// not the whole 200s+ track (≈10s).
+public final class MXFAudioReader: @unchecked Sendable {
+    public let sampleRate: Int
+    public let totalFrames: Int
+    public var channelCount: Int { plans.reduce(0) { $0 + $1.channels } }
+
+    private struct Plan {
+        let packets: [MXFEssenceReader.FrameRef]
+        let cum: [Int]            // cum[i] = first sample-frame of packet i; cum[count] = total frames
+        let channels: Int         // channels carried in each packet of this track
+        let bytesPerSample: Int
+    }
+    private let plans: [Plan]
+    private let handle: FileHandle
+    private let lock = NSLock()
+
+    private init(plans: [Plan], handle: FileHandle, sampleRate: Int, totalFrames: Int) {
+        self.plans = plans; self.handle = handle
+        self.sampleRate = sampleRate; self.totalFrames = totalFrames
+    }
+
+    deinit { try? handle.close() }
+
+    public static func open(url: URL) throws -> MXFAudioReader {
+        let index = try MXFEssenceReader.scanAudioIndex(url: url)
+        guard !index.soundTracks.isEmpty else { throw MXFAudioExtractor.ExtractionError.noSoundTracks }
+        let descriptors = try MXFSoundDescriptorReader.readAll(url: url)
+        guard let primary = descriptors.first else { throw MXFAudioExtractor.ExtractionError.noSoundDescriptor }
+        let bits = Int(primary.quantizationBits)
+        guard bits == 16 || bits == 24 || bits == 32 else { throw MXFAudioExtractor.ExtractionError.unsupportedBitDepth(bits) }
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            throw MXFAudioExtractor.ExtractionError.readFailed("cannot open \(url.lastPathComponent)")
+        }
+
+        let trackNumbers = index.soundTracks.keys.sorted()
+        var plans: [Plan] = []
+        var minTotal = Int.max
+        for (idx, n) in trackNumbers.enumerated() {
+            guard let t = index.soundTracks[n] else { continue }
+            let desc = descriptors.count == trackNumbers.count ? descriptors[idx] : primary
+            let ch = max(1, Int(desc.channelCount))
+            let bps = desc.bytesPerSample
+            let bpf = max(1, ch * bps)
+            var cum = [Int](repeating: 0, count: t.packets.count + 1)
+            for (i, p) in t.packets.enumerated() {
+                cum[i + 1] = cum[i] + Int(p.payloadLength) / bpf
+            }
+            plans.append(Plan(packets: t.packets, cum: cum, channels: ch, bytesPerSample: bps))
+            minTotal = min(minTotal, cum.last ?? 0)
+        }
+        let sampleRate = Int(primary.sampleRate.rounded())
+        return MXFAudioReader(plans: plans, handle: handle,
+                              sampleRate: sampleRate,
+                              totalFrames: minTotal == Int.max ? 0 : minTotal)
+    }
+
+    /// Decode `frameCount` samples per channel starting at `startFrame`
+    /// (source-frame index, full-file timeline). Out-of-range positions are
+    /// silence. Output channel order matches `MXFAudioExtractor.extract`.
+    public func decodeRange(startFrame: Int, frameCount: Int) -> [[Float]] {
+        guard frameCount > 0 else { return plans.flatMap { Array(repeating: [Float](), count: $0.channels) } }
+        lock.lock(); defer { lock.unlock() }
+        var out: [[Float]] = []
+        let hi = startFrame + frameCount
+        for plan in plans {
+            var chans = [[Float]](repeating: [Float](repeating: 0, count: frameCount), count: plan.channels)
+            let total = plan.cum.last ?? 0
+            if startFrame < total && hi > 0 {
+                var pi = packetContaining(plan.cum, max(0, startFrame))
+                while pi < plan.packets.count && plan.cum[pi] < hi {
+                    let pStart = plan.cum[pi]
+                    if let data = readPacket(plan.packets[pi]) {
+                        var dec = [[Float]](repeating: [], count: plan.channels)
+                        MXFAudioExtractor.decodePCM(data: data, bytesPerSample: plan.bytesPerSample,
+                                                    channels: plan.channels, into: &dec)
+                        for c in 0..<plan.channels {
+                            let n = dec[c].count
+                            for j in 0..<n {
+                                let outIdx = pStart + j - startFrame
+                                if outIdx >= 0 && outIdx < frameCount { chans[c][outIdx] = dec[c][j] }
+                            }
+                        }
+                    }
+                    pi += 1
+                }
+            }
+            out.append(contentsOf: chans)
+        }
+        return out
+    }
+
+    private func readPacket(_ ref: MXFEssenceReader.FrameRef) -> Data? {
+        do {
+            try handle.seek(toOffset: ref.payloadOffset)
+            let d = try handle.read(upToCount: Int(ref.payloadLength))
+            return (d?.count == Int(ref.payloadLength)) ? d : nil
+        } catch { return nil }
+    }
+
+    /// Largest packet index `p` with `cum[p] <= frame`.
+    private func packetContaining(_ cum: [Int], _ frame: Int) -> Int {
+        var lo = 0, hi = cum.count - 2
+        if hi < 0 { return 0 }
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if cum[mid] <= frame { lo = mid } else { hi = mid - 1 }
+        }
+        return lo
     }
 }

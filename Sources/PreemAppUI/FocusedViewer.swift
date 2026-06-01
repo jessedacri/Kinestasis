@@ -25,4 +25,12 @@ public enum FocusedViewer: Sendable {
 public enum SourcePaneTab: Sendable, Equatable {
     case source
     case effectControls
+    case color
+}
+
+/// Bin browser filter mode. FCP-style: show all master clips, or only
+/// the favorite sub-ranges marked across them.
+public enum BinFilter: String, Sendable, Equatable, CaseIterable {
+    case all = "All"
+    case favorites = "Favorites"
 }

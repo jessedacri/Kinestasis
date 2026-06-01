@@ -219,6 +219,19 @@ public enum ParameterValue: Codable, Sendable {
     case point(x: Double, y: Double)
     case color(r: Double, g: Double, b: Double, a: Double)
     case keyframed([Keyframe])
+    /// A tone curve as a list of control points (input→output, both
+    /// 0…1). Used by the color grader's RGB/master curves. Not
+    /// keyframed in v1.
+    case curve([CurvePoint])
+}
+
+/// One control point on a tone curve. `x` is the input level, `y` the
+/// output, both normalized 0…1. An empty/2-point identity curve maps
+/// straight through.
+public struct CurvePoint: Codable, Sendable, Hashable {
+    public var x: Double
+    public var y: Double
+    public init(x: Double, y: Double) { self.x = x; self.y = y }
 }
 
 public struct Keyframe: Codable, Sendable {

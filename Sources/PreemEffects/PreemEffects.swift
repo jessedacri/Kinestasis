@@ -12,7 +12,9 @@ public enum PreemEffects {
     /// expands to the rest.
     public static let builtinKeys: [String] = [
         "preem.transform",        // scale, rotate, position, anchor
+        "preem.crop",             // T/R/B/L + feather
         "preem.opacity",          // 0…1 with keyframes
+        "preem.color",            // Lumetri-style grade: exposure, contrast, WB, sat, curves, LUT
         "preem.crossDissolve",    // transition between two layers
         "preem.audio.hpf",        // re-uses Polymerge HighPassFilter
         "preem.audio.lpf",

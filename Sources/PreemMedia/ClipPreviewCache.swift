@@ -1,8 +1,10 @@
 import Foundation
 import AVFoundation
 import CoreGraphics
+import CoreImage
 import CoreMedia
 import PreemCore
+import PolymergePlayback
 
 /// In-memory cache of per-clip preview data drawn into the timeline:
 /// downsampled audio peaks for audio clips, evenly-spaced still frames
@@ -152,6 +154,11 @@ public final class ClipPreviewCache {
     // MARK: - Video thumbnails
 
     private nonisolated static func generateThumbnails(url: URL, count: Int, heightPx: Int) async -> ThumbStrip? {
+        // AVFoundation can't open MXF — decode filmstrip frames with the
+        // native demuxer instead.
+        if url.pathExtension.lowercased() == "mxf" {
+            return await generateMXFThumbnails(url: url, count: count, heightPx: heightPx)
+        }
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetPreferPreciseDurationAndTimingKey: true
         ])
@@ -195,5 +202,31 @@ public final class ClipPreviewCache {
         }
         guard !images.isEmpty else { return nil }
         return ThumbStrip(images: images)
+    }
+
+    /// MXF filmstrip thumbnails via the native demuxer — N evenly-spaced
+    /// decoded frames scaled to `heightPx`. Runs on a background task; the
+    /// per-frame seek+decode is fine off the playback path.
+    private nonisolated static func generateMXFThumbnails(url: URL, count: Int, heightPx: Int) async -> ThumbStrip? {
+        guard count > 0, let src = try? await MXFFrameSource.load(url: url) else { return nil }
+        defer { src.tearDown() }
+        let dur = src.durationSeconds
+        guard dur > 0 else { return nil }
+        let ci = CIContext(options: [.cacheIntermediates: false])
+        var images: [CGImage] = []
+        images.reserveCapacity(count)
+        for i in 0..<count {
+            let f = count == 1 ? 0.5 : Double(i) / Double(count - 1)
+            let t = min(max(0, dur * f), dur)
+            do {
+                try await src.seek(to: CMTime(seconds: t, preferredTimescale: 600))
+                guard let frame = try await src.nextFrame() else { continue }
+                let full = CIImage(cvPixelBuffer: frame.pixelBuffer)
+                let scale = full.extent.height > 0 ? CGFloat(heightPx * 2) / full.extent.height : 1
+                let scaled = full.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                if let cg = ci.createCGImage(scaled, from: scaled.extent) { images.append(cg) }
+            } catch { continue }
+        }
+        return images.isEmpty ? nil : ThumbStrip(images: images)
     }
 }

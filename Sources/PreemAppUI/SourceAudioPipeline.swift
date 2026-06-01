@@ -30,6 +30,12 @@ public final class SourceAudioPipeline {
     /// rebuild when re-syncing the same clip after a seek.
     private var preparedClipID: ClipID?
     private var preparedTotalFrames: Int64 = 0
+    /// For MXF (slow whole-track decode) the source buffer covers only a
+    /// window around the play position, decoded on demand; rebuilt when a
+    /// seek lands outside it. Non-MXF keeps the whole-clip buffer.
+    private var preparedWindowStart: Int64 = 0
+    private var preparedWindowFrames: Int64 = 0
+    private static let windowSeconds: Double = 60
 
     public init() {}
 
@@ -46,14 +52,39 @@ public final class SourceAudioPipeline {
     /// just seeks. Call before `play()`.
     public func sync(to clip: ClipSource, startSeconds: Double) async {
         let initialSample = secondsToSamples(startSeconds)
+        let total = secondsToSamples(clip.duration.seconds)
+        let isMXF = clip.url.pathExtension.lowercased() == "mxf"
 
-        if preparedClipID != clip.id {
-            guard let buffer = await buildBuffer(for: clip) else {
+        // Decide whether the current buffer already covers this position.
+        let tail = secondsToSamples(2)
+        let needsRebuild: Bool = {
+            if preparedClipID != clip.id { return true }
+            if !isMXF { return false }   // whole-clip buffer always covers
+            return initialSample < preparedWindowStart
+                || initialSample > preparedWindowStart + preparedWindowFrames - tail
+        }()
+
+        if needsRebuild {
+            let winStart: Int64
+            let winFrames: Int64
+            if isMXF {
+                let pre = secondsToSamples(2)
+                winStart = max(0, initialSample - pre)
+                winFrames = min(secondsToSamples(Self.windowSeconds), max(0, total - winStart))
+            } else {
+                winStart = 0
+                winFrames = total
+            }
+            guard winFrames > 0,
+                  let buffer = await buildBuffer(for: clip,
+                                                 windowStartSample: Int(winStart),
+                                                 windowFrames: Int(winFrames)) else {
                 preparedClipID = nil
                 return
             }
-            let total = secondsToSamples(clip.duration.seconds)
             preparedTotalFrames = total
+            preparedWindowStart = winStart
+            preparedWindowFrames = winFrames
             transport.setTotalSamples(total)
             transport.playheadSample = initialSample
             engine.prepare(
@@ -94,23 +125,25 @@ public final class SourceAudioPipeline {
 
     // MARK: - Helpers
 
-    private func buildBuffer(for clip: ClipSource) async -> TrackBuffer? {
-        guard !clip.audioTracks.isEmpty else { return nil }
-        let decoded: ClipAudioLoader.DecodedAudio
+    private func buildBuffer(for clip: ClipSource, windowStartSample: Int, windowFrames: Int) async -> TrackBuffer? {
+        guard !clip.audioTracks.isEmpty, windowFrames > 0 else { return nil }
+        let rawChannels: [[Float]]
         do {
-            decoded = try await loader.load(clipID: clip.id, url: clip.url)
+            rawChannels = try await loader.loadRange(
+                clipID: clip.id, url: clip.url,
+                startFrame: windowStartSample, frameCount: windowFrames
+            )
         } catch {
             PreemDebugLog.log("[SourceAudio] decode failed for \(clip.name): \(error)")
             return nil
         }
-        guard decoded.channels.count >= 1 else { return nil }
-        let totalFrames = decoded.channels[0].count
+        guard let first = rawChannels.first, !first.isEmpty else { return nil }
         return TrackBuffer(
             id: UUID(),
-            length: totalFrames,
-            channelCount: decoded.channels.count,
-            fileOffsetSamples: 0,
-            rawChannels: decoded.channels,
+            length: windowFrames,
+            channelCount: rawChannels.count,
+            fileOffsetSamples: Int64(windowStartSample),
+            rawChannels: rawChannels,
             processedChannels: nil,
             phaseDelayInt: 0,
             usedCorrectedSource: false,

@@ -16,6 +16,15 @@ public struct RationalTime: Hashable, Codable, Sendable {
         self.scale = scale
     }
 
+    /// Convenience for sources that only know seconds (source-viewer
+    /// marks, favorites). `scale` defaults to 600 — the CMTime-style
+    /// common timescale; frame alignment is re-applied at placement.
+    public init(seconds: Double, scale: Int32 = 600) {
+        precondition(scale > 0, "scale must be positive")
+        self.value = Int64((seconds * Double(scale)).rounded())
+        self.scale = scale
+    }
+
     public static let zero = RationalTime(value: 0, scale: 1)
 
     public var seconds: Double { Double(value) / Double(scale) }

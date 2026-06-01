@@ -75,6 +75,10 @@ public final class WorkspaceModel: ObservableObject {
     @Published public var sourceTimeSeconds: Double = 0
     @Published public var sourceInMark: Double?
     @Published public var sourceOutMark: Double?
+    /// True once the PPE source player has presented its first real frame
+    /// after a play start. The source viewer holds the still placeholder
+    /// over PPE until this flips, so play-after-skim doesn't flash black.
+    @Published public var sourcePlaybackReady: Bool = false
     @Published public var focusedViewer: FocusedViewer = .program
     /// 0…1 progress of an in-flight pre-render. nil = no render running.
     /// Driven by `renderInToOut`; consumed by the program viewer header
@@ -94,6 +98,10 @@ public final class WorkspaceModel: ObservableObject {
     /// selected timeline clip's transform/crop and (eventually)
     /// keyframes. `⇧⌘5` flips to `.effectControls`.
     @Published public var sourcePaneTab: SourcePaneTab = .source
+    /// Bin browser filter. `.all` shows every master clip as a filmstrip;
+    /// `.favorites` shows only the marked favorite sub-ranges as their
+    /// own draggable filmstrip entries.
+    @Published public var binFilter: BinFilter = .all
     /// Set by RealtimeProgramHost when the compose-and-present
     /// roundtrip is taking too long on a sustained run. The program
     /// viewer header surfaces this as a subtle "Render In to Out for
@@ -111,6 +119,13 @@ public final class WorkspaceModel: ObservableObject {
     public var isPlaying: Bool       { playbackState.isPlaying }
     public var sourceIsPlaying: Bool { playbackState.isSourcePlaying }
     public var playbackRate: Double  { playbackState.rate }
+
+    /// True when In/Out/Favorite keystrokes should act on the source clip:
+    /// either the source viewer is focused, or the bin is focused with a
+    /// clip skimmed/loaded into the source viewer (FCP marks the skimmer).
+    public var sourceMarksActive: Bool {
+        sourceClip != nil && (focusedViewer == .source || focusedViewer == .bin)
+    }
 
     // MARK: - Undo / redo
 
@@ -236,6 +251,9 @@ public final class WorkspaceModel: ObservableObject {
     /// via `PlaybackState`: only one of the two ever runs at a time.
     public let sourceAudio = SourceAudioPipeline()
     public let previewCache = ClipPreviewCache()
+    /// Fast still-frame source for skim / scrub / paused source display.
+    /// Reserves the PPE playback decoder for actual playback.
+    public let skimProvider = SkimFrameProvider()
 
     /// Bumped whenever the preview cache commits new waveform / thumbnail
     /// data. The SwiftUI timeline host observes this so `updateNSView`
@@ -292,6 +310,7 @@ public final class WorkspaceModel: ObservableObject {
         isDirty = false
         audio.invalidate(); sourceAudio.invalidate()
         previewCache.clear()
+        skimProvider.clear()
     }
 
     /// `completion` reports whether the project is saved when the call
@@ -370,6 +389,7 @@ public final class WorkspaceModel: ObservableObject {
             isDirty = false
             audio.invalidate(); sourceAudio.invalidate()
             previewCache.clear()
+            skimProvider.clear()
             for clip in loaded.mediaPool.clips.values {
                 schedulePreviews(for: clip)
             }
@@ -1387,6 +1407,79 @@ public final class WorkspaceModel: ObservableObject {
     public func clearSourceMarks() {
         sourceInMark = nil
         sourceOutMark = nil
+    }
+
+    /// Load a clip into the Source viewer (a click / double-click). Resets
+    /// the playhead + marks + playback when the clip actually changes.
+    /// Distinct from `skimSource`, which keeps following the cursor.
+    public func loadSourceClip(_ clip: ClipSource) {
+        let changing = sourceClip?.id != clip.id
+        sourceClip = clip
+        focusedViewer = .source
+        if changing {
+            sourceTimeSeconds = 0
+            clearSourceMarks()
+            stopSource()
+        }
+    }
+
+    /// Skim: make `clip` the active source and move its playhead to
+    /// `seconds`, WITHOUT the load reset (so the playhead follows the
+    /// cursor). Marks are cleared only when crossing to a new clip.
+    public func skimSource(to clip: ClipSource, seconds: Double) {
+        if sourceClip?.id != clip.id {
+            sourceClip = clip
+            clearSourceMarks()
+            stopSource()
+        }
+        let t = max(0, min(clip.duration.seconds, seconds))
+        if sourceTimeSeconds != t { sourceTimeSeconds = t }
+    }
+
+    // MARK: - Favorites (FCP-style subclips)
+
+    /// Mutate a source clip in the media pool and keep the published
+    /// `sourceClip` copy in sync so the bin + source viewer refresh.
+    private func updateClipSource(_ id: ClipID, _ mutate: (inout ClipSource) -> Void) {
+        guard var clip = project.mediaPool.clips[id] else { return }
+        mutate(&clip)
+        project.mediaPool.clips[id] = clip
+        if sourceClip?.id == id { sourceClip = clip }
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    /// Favorite the current source In/Out selection (full duration if
+    /// unmarked) on the active source clip. Many favorites can be made
+    /// from one clip. After favoriting, marks are cleared so the next
+    /// selection starts fresh (FCP behavior).
+    @discardableResult
+    public func favoriteSourceSelection(rating: FavoriteRange.Rating = .favorite) -> FavoriteRange? {
+        guard let source = sourceClip else { return nil }
+        let total = source.duration.seconds
+        let s = max(0, min(sourceInMark ?? 0, total))
+        let e = max(s, min(sourceOutMark ?? total, total))
+        let dur = e - s
+        guard dur > 0.04 else { return nil }
+        let range = TimeRange(start: RationalTime(seconds: s), duration: RationalTime(seconds: dur))
+        let existing = source.favorites.filter { $0.rating == rating }.count
+        let label = rating == .favorite ? "Favorite" : "Reject"
+        let fav = FavoriteRange(range: range, name: "\(label) \(existing + 1)", rating: rating)
+        updateClipSource(source.id) { $0.favorites.append(fav) }
+        clearSourceMarks()
+        return fav
+    }
+
+    public func removeFavorite(_ favoriteID: UUID, from clipID: ClipID) {
+        updateClipSource(clipID) { $0.favorites.removeAll { $0.id == favoriteID } }
+    }
+
+    public func renameFavorite(_ favoriteID: UUID, in clipID: ClipID, to name: String) {
+        updateClipSource(clipID) { clip in
+            if let i = clip.favorites.firstIndex(where: { $0.id == favoriteID }) {
+                clip.favorites[i].name = name
+            }
+        }
     }
 
     /// Insert source clip's [in, out] (or full duration if marks unset)
@@ -2858,6 +2951,111 @@ public final class WorkspaceModel: ObservableObject {
         guard let sequence = activeSequence else { return }
         markDirty()
         invalidatePreRenderCache(for: sequence.id)
+    }
+
+    // MARK: - Color grade setters (preem.color)
+
+    /// `ColorGrade` sampled at the playhead for one clip — inspector read path.
+    public func clipColorGrade(_ id: PlacedClipID) -> ColorGrade? {
+        guard let sequence = activeSequence else { return nil }
+        for t in sequence.videoTracks where true {
+            if let c = t.clips.first(where: { $0.id == id }) {
+                return c.colorGrade(at: playheadTime.seconds - c.timelineRange.start.seconds)
+            }
+        }
+        return nil
+    }
+
+    public func setColorParameterOnSelection(_ p: ColorGradeParameter, _ value: Double) {
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        updateSequence { sequence in
+            for id in ids {
+                let localT = clipLocalSecondsAtPlayhead(id, in: sequence)
+                updatePlacedClip(id, in: &sequence) { $0.setColorParameter(p, value: value, at: localT) }
+            }
+        }
+    }
+
+    /// Light variant for slider drags — bracket with `beginUndoBatch()` /
+    /// (`endUndoBatch()` + `commitTransformEdits()`).
+    public func setColorParameterOnSelectionLight(_ p: ColorGradeParameter, _ value: Double) {
+        guard let idx = project.sequences.firstIndex(where: { $0.id == activeSequenceID }) else { return }
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        var sequence = project.sequences[idx]
+        for id in ids {
+            let localT = clipLocalSecondsAtPlayhead(id, in: sequence)
+            updatePlacedClip(id, in: &sequence) { $0.setColorParameter(p, value: value, at: localT) }
+        }
+        project.sequences[idx] = sequence
+    }
+
+    public func toggleColorKeyframingOnSelection(_ p: ColorGradeParameter) {
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        updateSequence { sequence in
+            for id in ids {
+                let localT = clipLocalSecondsAtPlayhead(id, in: sequence) ?? 0
+                updatePlacedClip(id, in: &sequence) { $0.toggleColorKeyframing(p, at: localT) }
+            }
+        }
+    }
+
+    public func setColorInputSpaceOnSelection(_ space: ColorTransferSpace) {
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        updateSequence { sequence in
+            for id in ids {
+                updatePlacedClip(id, in: &sequence) { $0.setColorInputSpace(space) }
+            }
+        }
+    }
+
+    public func setColorCurveOnSelection(_ name: String, _ points: [CurvePoint]) {
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        updateSequence { sequence in
+            for id in ids {
+                updatePlacedClip(id, in: &sequence) { $0.setColorCurve(name, points) }
+            }
+        }
+    }
+
+    /// Light variant for live curve dragging — bracket with `beginUndoBatch()`
+    /// / (`endUndoBatch()` + `commitTransformEdits()`).
+    public func setColorCurveOnSelectionLight(_ name: String, _ points: [CurvePoint]) {
+        guard let idx = project.sequences.firstIndex(where: { $0.id == activeSequenceID }) else { return }
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        var sequence = project.sequences[idx]
+        for id in ids {
+            updatePlacedClip(id, in: &sequence) { $0.setColorCurve(name, points) }
+        }
+        project.sequences[idx] = sequence
+    }
+
+    public func setColorLUTOnSelection(_ path: String?) {
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        updateSequence { sequence in
+            for id in ids {
+                updatePlacedClip(id, in: &sequence) { $0.setColorLUT(path: path) }
+            }
+        }
+    }
+
+    /// Strip the whole color grade from the selection.
+    public func resetColorOnSelection() {
+        let ids = selectedVideoClipIDs
+        guard !ids.isEmpty else { return }
+        updateSequence { sequence in
+            for id in ids {
+                updatePlacedClip(id, in: &sequence) { clip in
+                    clip.effects.removeAll { $0.effectKey == "preem.color" }
+                }
+            }
+        }
     }
 
     /// Toggle keyframing for one Transform/Crop parameter on the clip.

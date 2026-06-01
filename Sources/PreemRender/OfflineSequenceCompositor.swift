@@ -79,6 +79,12 @@ public final class OfflineSequenceCompositor {
     /// presenting a single source frame — avoids allocating + clearing a
     /// full-size scratch buffer every cached-playback frame.
     private let blackTexture: MTLTexture
+    /// 2×2×2 identity 3D LUT, bound when a layer has no creative LUT.
+    private let identityLUT3D: MTLTexture
+    /// Parsed `.cube` LUTs keyed by file path. Loaded on first use, then
+    /// cached for the compositor's lifetime.
+    private var lutTextures: [String: MTLTexture] = [:]
+    private var lutFailedPaths: Set<String> = []
     /// Scratch pool for intermediate layer accumulation. Sized small
     /// (~4 buffers) because at any one time we hold the running
     /// accumulator plus, for cross-dissolves, one combined-AB temp.
@@ -100,7 +106,7 @@ public final class OfflineSequenceCompositor {
         case source(ClipID)
         case clip(PlacedClipID)
     }
-    private var frameSources: [DecoderKey: AVAssetFrameSource] = [:]
+    private var frameSources: [DecoderKey: VideoFrameSource] = [:]
     private var lastSourceTime: [DecoderKey: Double] = [:]
 
     // Video clips that overlap a same-source sibling in time → isolated to
@@ -242,6 +248,31 @@ public final class OfflineSequenceCompositor {
         black.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
                       withBytes: &px, bytesPerRow: 4)
         self.blackTexture = black
+
+        // 2×2×2 identity 3D LUT — bound at the LUT texture slot whenever a
+        // layer has no .cube LUT (trilinear sampling returns the input
+        // unchanged), so the blend shader's texture3d arg is always valid.
+        let lutDesc = MTLTextureDescriptor()
+        lutDesc.textureType = .type3D
+        lutDesc.pixelFormat = .rgba32Float
+        lutDesc.width = 2; lutDesc.height = 2; lutDesc.depth = 2
+        lutDesc.usage = .shaderRead
+        lutDesc.storageMode = .shared
+        guard let idLut = device.makeTexture(descriptor: lutDesc) else {
+            throw CompositorError.textureBindingFailed
+        }
+        var lutData = [Float](repeating: 0, count: 2 * 2 * 2 * 4)
+        var li = 0
+        for b in 0..<2 { for g in 0..<2 { for r in 0..<2 {
+            lutData[li] = Float(r); lutData[li+1] = Float(g); lutData[li+2] = Float(b); lutData[li+3] = 1
+            li += 4
+        } } }
+        let lbpr = 2 * MemoryLayout<Float>.size * 4
+        idLut.replace(region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                        size: MTLSize(width: 2, height: 2, depth: 2)),
+                      mipmapLevel: 0, slice: 0, withBytes: &lutData,
+                      bytesPerRow: lbpr, bytesPerImage: lbpr * 2)
+        self.identityLUT3D = idLut
     }
 
     public func teardown() {
@@ -373,11 +404,12 @@ public final class OfflineSequenceCompositor {
             let isLast = idx == layers.count - 1
             let dst: CVPixelBuffer = isLast ? output : try allocScratch()
             switch layer {
-            case .single(let frame, let uniforms):
-                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, into: dst, on: cmd)
-            case .crossDissolve(let aF, let aU, let bF, let bU, let progress):
+            case .single(let frame, let uniforms, let color, let curve, let lut):
+                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, color: color, curve: curve, lut: lut, into: dst, on: cmd)
+            case .crossDissolve(let aF, let aU, let aC, let aCv, let bF, let bU, let bC, let bCv, let progress):
                 encodeCrossDissolve(
-                    acc: acc, a: aF, aUniforms: aU, b: bF, bUniforms: bU,
+                    acc: acc, a: aF, aUniforms: aU, aColor: aC, aCurve: aCv,
+                    b: bF, bUniforms: bU, bColor: bC, bCurve: bCv,
                     progress: progress, into: dst, on: cmd
                 )
             }
@@ -459,11 +491,12 @@ public final class OfflineSequenceCompositor {
             let isLast = idx == layers.count - 1
             let dst: CVPixelBuffer = isLast ? output : try allocScratch()
             switch layer {
-            case .single(let frame, let uniforms):
-                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, into: dst, on: cmd)
-            case .crossDissolve(let aF, let aU, let bF, let bU, let progress):
+            case .single(let frame, let uniforms, let color, let curve, let lut):
+                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, color: color, curve: curve, lut: lut, into: dst, on: cmd)
+            case .crossDissolve(let aF, let aU, let aC, let aCv, let bF, let bU, let bC, let bCv, let progress):
                 encodeCrossDissolve(
-                    acc: acc, a: aF, aUniforms: aU, b: bF, bUniforms: bU,
+                    acc: acc, a: aF, aUniforms: aU, aColor: aC, aCurve: aCv,
+                    b: bF, bUniforms: bU, bColor: bC, bCurve: bCv,
                     progress: progress, into: dst, on: cmd
                 )
             }
@@ -501,21 +534,23 @@ public final class OfflineSequenceCompositor {
         for (idx, layer) in layers.enumerated() {
             let isLast = idx == layers.count - 1
             switch (layer, isLast) {
-            case (.single(let frame, let uniforms), true):
-                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, intoTexture: outputTexture, on: cmd)
-            case (.single(let frame, let uniforms), false):
+            case (.single(let frame, let uniforms, let color, let curve, let lut), true):
+                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, color: color, curve: curve, lut: lut, intoTexture: outputTexture, on: cmd)
+            case (.single(let frame, let uniforms, let color, let curve, let lut), false):
                 let next = try allocScratch()
-                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, into: next, on: cmd)
+                encodeBlend(bottom: acc, top: frame, uniforms: uniforms, color: color, curve: curve, lut: lut, into: next, on: cmd)
                 acc = next
-            case (.crossDissolve(let aF, let aU, let bF, let bU, let progress), true):
+            case (.crossDissolve(let aF, let aU, let aC, let aCv, let bF, let bU, let bC, let bCv, let progress), true):
                 encodeCrossDissolve(
-                    acc: acc, a: aF, aUniforms: aU, b: bF, bUniforms: bU,
+                    acc: acc, a: aF, aUniforms: aU, aColor: aC, aCurve: aCv,
+                    b: bF, bUniforms: bU, bColor: bC, bCurve: bCv,
                     progress: progress, intoTexture: outputTexture, on: cmd
                 )
-            case (.crossDissolve(let aF, let aU, let bF, let bU, let progress), false):
+            case (.crossDissolve(let aF, let aU, let aC, let aCv, let bF, let bU, let bC, let bCv, let progress), false):
                 let next = try allocScratch()
                 encodeCrossDissolve(
-                    acc: acc, a: aF, aUniforms: aU, b: bF, bUniforms: bU,
+                    acc: acc, a: aF, aUniforms: aU, aColor: aC, aCurve: aCv,
+                    b: bF, bUniforms: bU, bColor: bC, bCurve: bCv,
                     progress: progress, into: next, on: cmd
                 )
                 acc = next
@@ -606,17 +641,17 @@ public final class OfflineSequenceCompositor {
 
     /// What the compositor renders on one video track at one time.
     private enum LayerContribution {
-        case single(CVPixelBuffer, LayerUniforms)
+        case single(CVPixelBuffer, LayerUniforms, ColorUniforms, [Float], MTLTexture?)
         /// Two paired-transition clips cross-dissolved. Each clip
-        /// carries its own transform uniforms so the shader can
-        /// aspect-fit A and B independently — the dissolve math
-        /// produces the correct `(1-p)*A + p*B` blend wherever both
-        /// rects overlap, and lets the underlying layer show through
-        /// in the regions only one clip covers (when their destRects
-        /// differ, e.g. a 4:3 clip dissolving to a 16:9 clip).
+        /// carries its own transform + color uniforms + curve LUT so the
+        /// shader can aspect-fit and grade A and B independently — the
+        /// dissolve math produces the correct `(1-p)*A + p*B` blend
+        /// wherever both rects overlap, and lets the underlying layer
+        /// show through in the regions only one clip covers (when their
+        /// destRects differ, e.g. a 4:3 clip dissolving to a 16:9 clip).
         case crossDissolve(
-            aFrame: CVPixelBuffer, aUniforms: LayerUniforms,
-            bFrame: CVPixelBuffer, bUniforms: LayerUniforms,
+            aFrame: CVPixelBuffer, aUniforms: LayerUniforms, aColor: ColorUniforms, aCurve: [Float],
+            bFrame: CVPixelBuffer, bUniforms: LayerUniforms, bColor: ColorUniforms, bCurve: [Float],
             progress: Double
         )
     }
@@ -634,6 +669,93 @@ public final class OfflineSequenceCompositor {
         public var bCropRect: SIMD4<Float>
         public var bRotation: SIMD4<Float>
         public var weights:  SIMD4<Float>   // .x = wA, .y = wB; rest reserved
+    }
+
+    /// Per-layer color grade uniforms (the `preem.color` effect). The
+    /// grade runs on the layer's source pixels before compositing:
+    /// input-transform (log/gamma → linear working) → exposure + white
+    /// balance in linear → back to display-referred Rec.709 → tone, sat,
+    /// vibrance. `c2.w` is the enable flag (0 = pass through).
+    public struct ColorUniforms {
+        public var c0: SIMD4<Float>  // x=inputSpaceID, y=exposureGain(2^stops), z=contrast(-1..1), w=saturationMult
+        public var c1: SIMD4<Float>  // x=temp(-1..1), y=tint(-1..1), z=highlights, w=shadows
+        public var c2: SIMD4<Float>  // x=whites, y=blacks, z=vibrance, w=enabled
+        // Camera-gamut → Rec.709 matrix rows (.xyz), applied in linear
+        // after the transfer-function decode. Identity for Rec.709 inputs.
+        public var g0: SIMD4<Float>
+        public var g1: SIMD4<Float>
+        public var g2: SIMD4<Float>
+
+        public static let disabled = ColorUniforms(
+            c0: SIMD4<Float>(0, 1, 0, 1), c1: .zero, c2: SIMD4<Float>(0, 0, 0, 0),
+            g0: SIMD4<Float>(1, 0, 0, 0), g1: SIMD4<Float>(0, 1, 0, 0), g2: SIMD4<Float>(0, 0, 1, 0))
+    }
+
+    /// Build shader color uniforms from a sampled `ColorGrade`. Returns
+    /// `.disabled` for an identity grade (neutral sliders AND Rec.709
+    /// input) so untouched clips pay no grading cost.
+    private func colorUniforms(_ g: ColorGrade) -> ColorUniforms {
+        if g.isIdentity { return .disabled }
+        let expGain = Float(pow(2.0, g.exposure))
+        let satMult = Float(1.0 + g.saturation / 100.0)   // -100→0, 0→1, +100→2
+        let gamut = ColorScience.gamutRows(g.inputSpace)
+        let lutEnabled: Float = (g.lutPath != nil && g.lutIntensity > 0) ? 1 : 0
+        // LUT enable + intensity ride the unused .w lanes of the gamut rows.
+        var g0 = gamut.0, g1 = gamut.1
+        g0.w = lutEnabled
+        g1.w = Float(max(0, min(1, g.lutIntensity / 100.0)))
+        return ColorUniforms(
+            c0: SIMD4<Float>(Float(g.inputSpace.shaderID), expGain, Float(g.contrast / 100.0), satMult),
+            c1: SIMD4<Float>(Float(g.temperature / 100.0), Float(g.tint / 100.0),
+                             Float(g.highlights / 100.0), Float(g.shadows / 100.0)),
+            c2: SIMD4<Float>(Float(g.whites / 100.0), Float(g.blacks / 100.0),
+                             Float(g.vibrance / 100.0), 1),
+            g0: g0, g1: g1, g2: gamut.2
+        )
+    }
+
+    /// 128-float curve LUT: 4 channels (master, R, G, B) × 32 samples,
+    /// fed to the shader as `constant float*`. Identity ramp where a
+    /// channel has no curve. Returns the shared identity LUT when the
+    /// grade has no curves at all (no per-frame allocation).
+    static let identityCurveLUT: [Float] = {
+        var a = [Float](repeating: 0, count: 128)
+        for ch in 0..<4 { for i in 0..<32 { a[ch * 32 + i] = Float(i) / 31.0 } }
+        return a
+    }()
+
+    private func curveLUT(_ g: ColorGrade) -> [Float] {
+        if g.curveMaster.isEmpty && g.curveRed.isEmpty
+            && g.curveGreen.isEmpty && g.curveBlue.isEmpty {
+            return Self.identityCurveLUT
+        }
+        var a = [Float](repeating: 0, count: 128)
+        func bake(_ pts: [CurvePoint], _ ch: Int) {
+            if pts.count < 2 {
+                for i in 0..<32 { a[ch * 32 + i] = Float(i) / 31.0 }
+                return
+            }
+            let tc = ToneCurve(pts)
+            for i in 0..<32 { a[ch * 32 + i] = Float(tc.evaluate(Double(i) / 31.0)) }
+        }
+        bake(g.curveMaster, 0); bake(g.curveRed, 1); bake(g.curveGreen, 2); bake(g.curveBlue, 3)
+        return a
+    }
+
+    /// Load (and cache) a `.cube` LUT as a 3D texture. Returns nil if the
+    /// file is missing/malformed (cached as failed so we don't retry every
+    /// frame). Reuses the PPE `.cube` parser.
+    private func lutTexture(forPath path: String) -> MTLTexture? {
+        if let t = lutTextures[path] { return t }
+        if lutFailedPaths.contains(path) { return nil }
+        do {
+            let loaded = try PPELUTLoader.load(url: URL(fileURLWithPath: path), device: device)
+            lutTextures[path] = loaded.texture
+            return loaded.texture
+        } catch {
+            lutFailedPaths.insert(path)
+            return nil
+        }
     }
 
     /// Seed frame sources for the layers active at `timelineSeconds`
@@ -675,7 +797,9 @@ public final class OfflineSequenceCompositor {
                 let key = decoderKey(for: clip.id, sourceID: clip.sourceClipID)
                 let frame = try await pullFrame(key: key, source: source, atSourceTime: sourceTime)
                 let uniforms = layerUniforms(for: clip, source: source, fadeAlpha: fade, clipLocalSeconds: clipLocal)
-                layers.append(.single(frame, uniforms))
+                let grade = clip.colorGrade(at: clipLocal)
+                let lut = grade.lutPath.flatMap { lutTexture(forPath: $0) }
+                layers.append(.single(frame, uniforms, colorUniforms(grade), curveLUT(grade), lut))
             }
         }
         return layers
@@ -818,9 +942,11 @@ public final class OfflineSequenceCompositor {
             // itself, so we don't multiply in `layerAlpha` here.
             let aUniforms = layerUniforms(for: a, source: sa, fadeAlpha: 1.0, clipLocalSeconds: aClipLocal)
             let bUniforms = layerUniforms(for: b, source: sb, fadeAlpha: 1.0, clipLocalSeconds: bClipLocal)
+            let aGrade = a.colorGrade(at: aClipLocal)
+            let bGrade = b.colorGrade(at: bClipLocal)
             return .crossDissolve(
-                aFrame: aFrame, aUniforms: aUniforms,
-                bFrame: bFrame, bUniforms: bUniforms,
+                aFrame: aFrame, aUniforms: aUniforms, aColor: colorUniforms(aGrade), aCurve: curveLUT(aGrade),
+                bFrame: bFrame, bUniforms: bUniforms, bColor: colorUniforms(bGrade), bCurve: curveLUT(bGrade),
                 progress: progress
             )
         }
@@ -994,11 +1120,16 @@ public final class OfflineSequenceCompositor {
         return buf
     }
 
-    private func ensureFrameSource(key: DecoderKey, source: ClipSource) async throws -> AVAssetFrameSource {
+    private func ensureFrameSource(key: DecoderKey, source: ClipSource) async throws -> VideoFrameSource {
         if let cached = frameSources[key] { return cached }
-        let fs: AVAssetFrameSource
+        let fs: VideoFrameSource
         do {
-            fs = try await AVAssetFrameSource.load(url: source.url)
+            if source.url.pathExtension.lowercased() == "mxf" {
+                // AVFoundation can't open MXF — use the native demuxer.
+                fs = try await MXFFrameSource.load(url: source.url)
+            } else {
+                fs = try await AVAssetFrameSource.load(url: source.url)
+            }
         } catch {
             throw CompositorError.frameSourceLoadFailed(error.localizedDescription)
         }
@@ -1057,22 +1188,28 @@ public final class OfflineSequenceCompositor {
         bottom: CVPixelBuffer,
         top: CVPixelBuffer,
         uniforms: LayerUniforms,
+        color: ColorUniforms = .disabled,
+        curve: [Float] = OfflineSequenceCompositor.identityCurveLUT,
+        lut: MTLTexture? = nil,
         into output: CVPixelBuffer,
         on cmd: MTLCommandBuffer
     ) {
         guard let dst = makeTexture(from: output, usage: [.renderTarget]) else { return }
-        encodeBlend(bottom: bottom, top: top, uniforms: uniforms, intoTexture: dst, on: cmd)
+        encodeBlend(bottom: bottom, top: top, uniforms: uniforms, color: color, curve: curve, lut: lut, intoTexture: dst, on: cmd)
     }
 
     private func encodeBlend(
         bottom: CVPixelBuffer,
         top: CVPixelBuffer,
         uniforms: LayerUniforms,
+        color: ColorUniforms = .disabled,
+        curve: [Float] = OfflineSequenceCompositor.identityCurveLUT,
+        lut: MTLTexture? = nil,
         intoTexture dst: MTLTexture,
         on cmd: MTLCommandBuffer
     ) {
         guard let bottomTex = makeTexture(from: bottom, usage: [.shaderRead]) else { return }
-        encodeBlend(bottomTexture: bottomTex, top: top, uniforms: uniforms, intoTexture: dst, on: cmd)
+        encodeBlend(bottomTexture: bottomTex, top: top, uniforms: uniforms, color: color, curve: curve, lut: lut, intoTexture: dst, on: cmd)
     }
 
     /// Blend variant whose bottom is an existing `MTLTexture` (e.g. the
@@ -1081,6 +1218,9 @@ public final class OfflineSequenceCompositor {
         bottomTexture bottomTex: MTLTexture,
         top: CVPixelBuffer,
         uniforms: LayerUniforms,
+        color: ColorUniforms = .disabled,
+        curve: [Float] = OfflineSequenceCompositor.identityCurveLUT,
+        lut: MTLTexture? = nil,
         intoTexture dst: MTLTexture,
         on cmd: MTLCommandBuffer
     ) {
@@ -1095,8 +1235,12 @@ public final class OfflineSequenceCompositor {
         enc.setRenderPipelineState(blendPipeline)
         enc.setFragmentTexture(bottomTex, index: 0)
         enc.setFragmentTexture(topTex, index: 1)
+        enc.setFragmentTexture(lut ?? identityLUT3D, index: 2)
         var u = uniforms
         enc.setFragmentBytes(&u, length: MemoryLayout<LayerUniforms>.size, index: 0)
+        var col = color
+        enc.setFragmentBytes(&col, length: MemoryLayout<ColorUniforms>.size, index: 1)
+        curve.withUnsafeBytes { enc.setFragmentBytes($0.baseAddress!, length: $0.count, index: 2) }
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
     }
@@ -1104,15 +1248,16 @@ public final class OfflineSequenceCompositor {
     /// Alpha-aware cross-dissolve into a CVPixelBuffer.
     private func encodeCrossDissolve(
         acc: CVPixelBuffer,
-        a: CVPixelBuffer, aUniforms: LayerUniforms,
-        b: CVPixelBuffer, bUniforms: LayerUniforms,
+        a: CVPixelBuffer, aUniforms: LayerUniforms, aColor: ColorUniforms = .disabled, aCurve: [Float] = OfflineSequenceCompositor.identityCurveLUT,
+        b: CVPixelBuffer, bUniforms: LayerUniforms, bColor: ColorUniforms = .disabled, bCurve: [Float] = OfflineSequenceCompositor.identityCurveLUT,
         progress: Double,
         into output: CVPixelBuffer,
         on cmd: MTLCommandBuffer
     ) {
         guard let dst = makeTexture(from: output, usage: [.renderTarget]) else { return }
         encodeCrossDissolve(
-            acc: acc, a: a, aUniforms: aUniforms, b: b, bUniforms: bUniforms,
+            acc: acc, a: a, aUniforms: aUniforms, aColor: aColor, aCurve: aCurve,
+            b: b, bUniforms: bUniforms, bColor: bColor, bCurve: bCurve,
             progress: progress, intoTexture: dst, on: cmd
         )
     }
@@ -1124,8 +1269,8 @@ public final class OfflineSequenceCompositor {
     /// pass — the shader does the masking + sampling per-fragment.
     private func encodeCrossDissolve(
         acc: CVPixelBuffer,
-        a: CVPixelBuffer, aUniforms: LayerUniforms,
-        b: CVPixelBuffer, bUniforms: LayerUniforms,
+        a: CVPixelBuffer, aUniforms: LayerUniforms, aColor: ColorUniforms = .disabled, aCurve: [Float] = OfflineSequenceCompositor.identityCurveLUT,
+        b: CVPixelBuffer, bUniforms: LayerUniforms, bColor: ColorUniforms = .disabled, bCurve: [Float] = OfflineSequenceCompositor.identityCurveLUT,
         progress: Double,
         intoTexture dst: MTLTexture,
         on cmd: MTLCommandBuffer
@@ -1159,6 +1304,11 @@ public final class OfflineSequenceCompositor {
             weights:   SIMD4<Float>(wA, wB, 0, 0)
         )
         enc.setFragmentBytes(&u, length: MemoryLayout<CrossDissolveUniforms>.size, index: 0)
+        var ca = aColor, cb = bColor
+        enc.setFragmentBytes(&ca, length: MemoryLayout<ColorUniforms>.size, index: 1)
+        enc.setFragmentBytes(&cb, length: MemoryLayout<ColorUniforms>.size, index: 2)
+        aCurve.withUnsafeBytes { enc.setFragmentBytes($0.baseAddress!, length: $0.count, index: 3) }
+        bCurve.withUnsafeBytes { enc.setFragmentBytes($0.baseAddress!, length: $0.count, index: 4) }
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
     }
@@ -1204,11 +1354,136 @@ public final class OfflineSequenceCompositor {
         float4 rotation;   // .x = cosθ, .y = sinθ; rest reserved
     };
 
+    // ===== Color management + grade (the `preem.color` effect) =====
+    // Mirror of Swift's ColorUniforms.
+    struct ColorUniforms {
+        float4 c0;  // x=inputSpaceID, y=expGain(2^stops), z=contrast, w=satMult
+        float4 c1;  // x=temp, y=tint, z=highlights, w=shadows
+        float4 c2;  // x=whites, y=blacks, z=vibrance, w=enabled
+        float4 g0;  // camera-gamut → Rec.709 matrix rows (.xyz)
+        float4 g1;
+        float4 g2;
+    };
+
+    static inline float3 srgbToLinear(float3 c) {
+        float3 lo = c / 12.92;
+        float3 hi = pow(max((c + 0.055) / 1.055, 0.0), float3(2.4));
+        return select(lo, hi, c > 0.04045);
+    }
+    static inline float3 rec709ToLinear(float3 c) { return pow(max(c, 0.0), float3(2.4)); }
+    static inline float3 linearToRec709(float3 c) { return pow(max(c, 0.0), float3(1.0 / 2.4)); }
+
+    static inline float logC3ToLin(float x) {
+        return (x > 0.149658) ? (pow(10.0, (x - 0.385537) / 0.2471896) - 0.052272) / 5.555556
+                              : (x - 0.092809) / 5.367655;
+    }
+    static inline float sLog3ToLin(float x) {
+        return (x >= 0.1673609) ? (pow(10.0, (x * 1023.0 - 420.0) / 261.5) * 0.19 - 0.01)
+                                : (x * 1023.0 - 95.0) * 0.01125000 / (171.2102946 - 95.0);
+    }
+    // Canon C-Log3 decode (colour-science constants).
+    static inline float cLog3ToLin(float x) {
+        if (x < 0.04076162)  return -(pow(10.0, (0.07623209 - x) / 0.42889912) - 1.0) / 14.98325;
+        if (x <= 0.105357102) return (x - 0.073059361) / 2.3069815;
+        return (pow(10.0, (x - 0.069886632) / 0.42889912) - 1.0) / 14.98325;
+    }
+    // Canon C-Log2 decode (colour-science constants).
+    static inline float cLog2ToLin(float x) {
+        return (x < 0.035388128)
+            ? -(pow(10.0, (0.035388128 - x) / 0.281863093) - 1.0) / 87.09937546
+            :  (pow(10.0, (x - 0.035388128) / 0.281863093) - 1.0) / 87.09937546;
+    }
+    static inline float vLogToLin(float x) {
+        return (x < 0.181) ? (x - 0.125) / 5.6 : pow(10.0, (x - 0.598206) / 0.241514) - 0.00873;
+    }
+
+    static inline float3 decodeToLinear(float3 enc, int space) {
+        switch (space) {
+            case 1: return srgbToLinear(enc);
+            case 2: return max(enc, 0.0);
+            case 3: return rec709ToLinear(enc);   // Rec.2020 transfer (2.4)
+            case 4: return float3(logC3ToLin(enc.r), logC3ToLin(enc.g), logC3ToLin(enc.b));
+            case 5: return float3(sLog3ToLin(enc.r), sLog3ToLin(enc.g), sLog3ToLin(enc.b));
+            case 6: return float3(cLog3ToLin(enc.r), cLog3ToLin(enc.g), cLog3ToLin(enc.b));
+            case 7: return float3(vLogToLin(enc.r), vLogToLin(enc.g), vLogToLin(enc.b));
+            case 8: return float3(cLog2ToLin(enc.r), cLog2ToLin(enc.g), cLog2ToLin(enc.b));
+            default: return rec709ToLinear(enc);
+        }
+    }
+
+    static inline float lumaRec709(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+    /// Sample one channel of the 4×32 curve LUT (linear interp). ch:
+    /// 0=master, 1=R, 2=G, 3=B.
+    static inline float sampleCurve(constant float* curves, int ch, float x) {
+        x = saturate(x);
+        float fi = x * 31.0;
+        int i0 = int(fi);
+        int i1 = min(i0 + 1, 31);
+        float f = fi - float(i0);
+        int base = ch * 32;
+        return mix(curves[base + i0], curves[base + i1], f);
+    }
+
+    /// enc = display/log-encoded source RGB → returns display-referred
+    /// Rec.709 after a color-managed grade. Pass-through when disabled.
+    static inline float3 applyColorGrade(float3 enc, constant ColorUniforms& u, constant float* curves) {
+        if (u.c2.w < 0.5) return enc;
+        int space = int(u.c0.x + 0.5);
+
+        // 1. Input transform → scene-linear, then camera-gamut → Rec.709
+        //    working primaries (identity for Rec.709 inputs).
+        float3 cam = decodeToLinear(clamp(enc, 0.0, 1.0), space);
+        float3 lin = float3(dot(u.g0.xyz, cam), dot(u.g1.xyz, cam), dot(u.g2.xyz, cam));
+
+        // 2. Scene-linear: white balance + exposure.
+        float temp = u.c1.x, tint = u.c1.y;
+        lin *= float3(1.0 + 0.30 * temp + 0.10 * tint,
+                      1.0 - 0.30 * tint,
+                      1.0 - 0.30 * temp + 0.10 * tint);
+        lin *= u.c0.y;
+
+        // 3. Linear → display-referred Rec.709 for tonal/creative ops.
+        float3 v = clamp(linearToRec709(max(lin, 0.0)), 0.0, 1.0);
+
+        // 4. Tonal zones (smooth luminance masks).
+        float L = lumaRec709(v);
+        v += u.c1.w * 0.5 * pow(saturate(1.0 - L), 2.0);   // shadows
+        v += u.c1.z * 0.5 * pow(saturate(L), 2.0);         // highlights
+        v += u.c2.y * 0.3 * pow(saturate(1.0 - L), 4.0);   // blacks
+        v += u.c2.x * 0.3 * pow(saturate(L), 4.0);         // whites
+        v = saturate(v);
+
+        // 5. Contrast about 0.5.
+        v = saturate((v - 0.5) * (1.0 + u.c0.z) + 0.5);
+
+        // 6. Saturation + vibrance.
+        float L2 = lumaRec709(v);
+        v = mix(float3(L2), v, u.c0.w);
+        float mx = max(v.r, max(v.g, v.b));
+        float mn = min(v.r, min(v.g, v.b));
+        float vibAmt = u.c2.z * (1.0 - (mx - mn));
+        v = mix(float3(L2), v, 1.0 + vibAmt);
+        v = saturate(v);
+
+        // 7. Curves: per-channel (R/G/B), then master applied to all.
+        v.r = sampleCurve(curves, 1, v.r);
+        v.g = sampleCurve(curves, 2, v.g);
+        v.b = sampleCurve(curves, 3, v.b);
+        v.r = sampleCurve(curves, 0, v.r);
+        v.g = sampleCurve(curves, 0, v.g);
+        v.b = sampleCurve(curves, 0, v.b);
+        return saturate(v);
+    }
+
     fragment float4 compositorBlendFragment(
         VertexOut in                              [[stage_in]],
         texture2d<float, access::sample> bottom   [[texture(0)]],
         texture2d<float, access::sample> top      [[texture(1)]],
-        constant LayerUniforms& u                 [[buffer(0)]]
+        constant LayerUniforms& u                 [[buffer(0)]],
+        constant ColorUniforms& col               [[buffer(1)]],
+        constant float* curves                    [[buffer(2)]],
+        texture3d<float, access::sample> lut      [[texture(2)]]
     ) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         float2 uv = in.uv;
@@ -1260,6 +1535,13 @@ public final class OfflineSequenceCompositor {
         }
         float feather = u.opacity.y;
         float4 t = top.sample(s, rotatedNorm);
+        t.rgb = applyColorGrade(t.rgb, col, curves);
+        // Creative .cube LUT (applied in display Rec.709, blended by intensity).
+        if (col.g0.w > 0.5) {
+            constexpr sampler ls(filter::linear, address::clamp_to_edge);
+            float3 looked = lut.sample(ls, saturate(t.rgb)).rgb;
+            t.rgb = mix(t.rgb, looked, col.g1.w);
+        }
         float coverage = 1.0;
         if (feather > 0.0001) {
             // Auto edge selection: feather only edges that are actually
@@ -1346,7 +1628,11 @@ public final class OfflineSequenceCompositor {
         texture2d<float, access::sample> acc      [[texture(0)]],
         texture2d<float, access::sample> texA     [[texture(1)]],
         texture2d<float, access::sample> texB     [[texture(2)]],
-        constant CrossDissolveUniforms& u         [[buffer(0)]]
+        constant CrossDissolveUniforms& u         [[buffer(0)]],
+        constant ColorUniforms& colA              [[buffer(1)]],
+        constant ColorUniforms& colB              [[buffer(2)]],
+        constant float* curvesA                   [[buffer(3)]],
+        constant float* curvesB                   [[buffer(4)]]
     ) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         float2 uv = in.uv;
@@ -1354,11 +1640,11 @@ public final class OfflineSequenceCompositor {
 
         float3 aSample = sampleLayerUV(uv, u.aDestRect, u.aCropRect, u.aRotation);
         float wA = aSample.z > 0.5 ? u.weights.x : 0.0;
-        float3 aColor = wA > 0.0 ? texA.sample(s, aSample.xy).rgb : float3(0.0);
+        float3 aColor = wA > 0.0 ? applyColorGrade(texA.sample(s, aSample.xy).rgb, colA, curvesA) : float3(0.0);
 
         float3 bSample = sampleLayerUV(uv, u.bDestRect, u.bCropRect, u.bRotation);
         float wB = bSample.z > 0.5 ? u.weights.y : 0.0;
-        float3 bColor = wB > 0.0 ? texB.sample(s, bSample.xy).rgb : float3(0.0);
+        float3 bColor = wB > 0.0 ? applyColorGrade(texB.sample(s, bSample.xy).rgb, colB, curvesB) : float3(0.0);
 
         float wAcc = max(0.0, 1.0 - wA - wB);
         float3 rgb = accColor.rgb * wAcc + aColor * wA + bColor * wB;

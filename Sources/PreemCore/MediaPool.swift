@@ -25,6 +25,23 @@ public enum BinItem: Codable, Sendable {
     case clip(ClipID)
 }
 
+/// A marked sub-range of a source clip — FCP-style "favorite" / "reject".
+/// Many can be created from one `ClipSource` by marking In/Out and pressing
+/// F (favorite). Favorites are filterable and draggable to the timeline like
+/// a subclip; the parent `ClipSource` is unchanged.
+public struct FavoriteRange: Codable, Sendable, Identifiable, Hashable {
+    public enum Rating: String, Codable, Sendable { case favorite, rejected }
+
+    public var id: UUID
+    public var range: TimeRange       // start + duration within the source
+    public var name: String?
+    public var rating: Rating
+
+    public init(id: UUID = UUID(), range: TimeRange, name: String? = nil, rating: Rating = .favorite) {
+        self.id = id; self.range = range; self.name = name; self.rating = rating
+    }
+}
+
 /// A source clip — the file on disk plus everything we know about it.
 /// Distinct from a `PlacedClip` (which is a *use* of this source on a timeline).
 public struct ClipSource: Codable, Sendable, Identifiable {
@@ -49,6 +66,10 @@ public struct ClipSource: Codable, Sendable, Identifiable {
 
     public var ml: MLMetadata
 
+    /// FCP-style favorite/reject sub-ranges marked in the bin. Empty for
+    /// projects saved before favorites existed (see `init(from:)`).
+    public var favorites: [FavoriteRange]
+
     public init(
         id: ClipID = ClipID(),
         url: URL,
@@ -64,13 +85,42 @@ public struct ClipSource: Codable, Sendable, Identifiable {
         roll: String? = nil,
         proxyURL: URL? = nil,
         thumbnailURL: URL? = nil,
-        ml: MLMetadata = MLMetadata()
+        ml: MLMetadata = MLMetadata(),
+        favorites: [FavoriteRange] = []
     ) {
         self.id = id; self.url = url; self.name = name
         self.format = format; self.duration = duration; self.startTimecode = startTimecode
         self.videoTracks = videoTracks; self.audioTracks = audioTracks
         self.camera = camera; self.scene = scene; self.take = take; self.roll = roll
         self.proxyURL = proxyURL; self.thumbnailURL = thumbnailURL; self.ml = ml
+        self.favorites = favorites
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, url, name, format, duration, startTimecode
+        case videoTracks, audioTracks, camera, scene, take, roll
+        case proxyURL, thumbnailURL, ml, favorites
+    }
+
+    // Custom decode so projects saved before `favorites` existed still load.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(ClipID.self, forKey: .id)
+        url = try c.decode(URL.self, forKey: .url)
+        name = try c.decode(String.self, forKey: .name)
+        format = try c.decode(MediaFormat.self, forKey: .format)
+        duration = try c.decode(RationalTime.self, forKey: .duration)
+        startTimecode = try c.decodeIfPresent(RationalTime.self, forKey: .startTimecode)
+        videoTracks = try c.decode([VideoTrackInfo].self, forKey: .videoTracks)
+        audioTracks = try c.decode([AudioTrackInfo].self, forKey: .audioTracks)
+        camera = try c.decodeIfPresent(CameraMetadata.self, forKey: .camera)
+        scene = try c.decodeIfPresent(String.self, forKey: .scene)
+        take = try c.decodeIfPresent(String.self, forKey: .take)
+        roll = try c.decodeIfPresent(String.self, forKey: .roll)
+        proxyURL = try c.decodeIfPresent(URL.self, forKey: .proxyURL)
+        thumbnailURL = try c.decodeIfPresent(URL.self, forKey: .thumbnailURL)
+        ml = try c.decode(MLMetadata.self, forKey: .ml)
+        favorites = try c.decodeIfPresent([FavoriteRange].self, forKey: .favorites) ?? []
     }
 }
 

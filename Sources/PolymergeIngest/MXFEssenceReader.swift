@@ -149,109 +149,59 @@ public struct MXFEssenceReader {
         }
     }
 
-    /// Scan the entire file. Blocking — run on a background task.
-    public static func scanIndex(url: URL) throws -> Index {
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            throw ReadError.cannotOpen(url.lastPathComponent)
-        }
-        defer { try? handle.close() }
+    // MARK: - Cached single-walk index
 
-        let started = Date()
-        var frames: [FrameRef] = []
-        frames.reserveCapacity(8192)
-        var codec: PictureCodec? = nil
-        var firstFramePreview: [UInt8] = []
+    private static let cacheLock = NSLock()
+    private static var indexCache: [String: (validity: String, index: ExtendedIndex)] = [:]
+    private static var cacheOrder: [String] = []
+    private static let cacheCap = 16
 
-        var cursor: UInt64 = 0
-        // Chunk size for reading KLV HEADERS (16B UL + up to 9B BER).
-        // The values themselves we skip via `seek` — never read into
-        // memory. Keeps peak RAM at ~16 KB even on 100 GB files.
-        while true {
-            try handle.seek(toOffset: cursor)
-            guard let headerData = try? handle.read(upToCount: 25),
-                  headerData.count >= 17 else {
-                break  // End of file or truncated
-            }
-            // Parse BER length.
-            let firstLenByte = headerData[16]
-            let valueLength: UInt64
-            let headerTotal: Int
-            if firstLenByte < 0x80 {
-                valueLength = UInt64(firstLenByte)
-                headerTotal = 17
-            } else {
-                let numBytes = Int(firstLenByte & 0x7F)
-                guard numBytes > 0, numBytes <= 8, headerData.count >= 17 + numBytes else {
-                    // Malformed / end of file / scan into junk —
-                    // bail gracefully instead of throwing, since
-                    // real MXFs sometimes pad with zero-run runs
-                    // that we can just walk past.
-                    break
-                }
-                var acc: UInt64 = 0
-                for i in 0..<numBytes {
-                    acc = (acc << 8) | UInt64(headerData[17 + i])
-                }
-                valueLength = acc
-                headerTotal = 17 + numBytes
-            }
-
-            let ul = Array(headerData.prefix(16))
-            let valueOffset = cursor + UInt64(headerTotal)
-
-            // Check if this UL is a picture essence item. The
-            // well-known pattern: bytes 0-7 are the SMPTE OL
-            // ("06.0E.2B.34.01.02.01.??"), bytes 8-11 identify
-            // the essence type family ("0D.01.03.01" for Generic
-            // Container essence items), byte 12 is the category
-            // (0x15 = picture, 0x16 = sound, 0x17 = data), byte 13
-            // is the item type designator.
-            if ul.count >= 16,
-               ul[0] == 0x06, ul[1] == 0x0E, ul[2] == 0x2B, ul[3] == 0x34,
-               ul[4] == 0x01, ul[5] == 0x02, ul[6] == 0x01,
-               ul[8] == 0x0D, ul[9] == 0x01, ul[10] == 0x03, ul[11] == 0x01,
-               ul[12] == 0x15 {
-                // Picture essence item. Record the frame.
-                frames.append(FrameRef(payloadOffset: valueOffset, payloadLength: valueLength))
-
-                // Classify on first frame.
-                if codec == nil {
-                    if let handle = try? FileHandle(forReadingFrom: url) {
-                        defer { try? handle.close() }
-                        try? handle.seek(toOffset: valueOffset)
-                        let snippet = try? handle.read(upToCount: 64)
-                        firstFramePreview = Array(snippet ?? Data())
-                    }
-                    // Classify by UL bytes 12-15 AND the first frame's
-                    // head bytes — the most reliable check since UL
-                    // vendors vary but the elementary stream doesn't.
-                    codec = classifyCodec(
-                        ulBytes12to15: [ul[12], ul[13], ul[14], ul[15]],
-                        firstFrameHead: firstFramePreview
-                    )
-                }
-            }
-
-            // Advance past the value. Use a large-value-safe jump.
-            cursor = valueOffset &+ valueLength
-        }
-
-        let elapsed = -started.timeIntervalSinceNow
-        return Index(
-            codec: codec ?? .unknown(fourBytes: []),
-            frames: frames,
-            firstFramePreview: firstFramePreview,
-            scanDuration: elapsed
-        )
+    private static func validityKey(_ url: URL) -> String {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(size)|\(mtime)"
     }
 
-    /// Walk the KLV stream and return BOTH picture frame refs
-    /// AND sound essence packet refs grouped by track number.
-    /// Same structural pass as `scanIndex` but also records sound
-    /// packets (UL byte 12 == 0x16). One pass over the file keeps
-    /// the I/O cost the same whether the caller wants video alone
-    /// or video + audio.
+    /// Scan the entire file for the picture index. Delegates to the
+    /// combined picture+sound walk (cached per URL) so video, audio, and
+    /// probe callers share ONE file walk instead of each re-scanning.
+    public static func scanIndex(url: URL) throws -> Index {
+        try scanAudioIndex(url: url).picture
+    }
+
+    /// Walk the KLV stream and return BOTH picture frame refs AND sound
+    /// essence packet refs grouped by track number — one pass over the
+    /// file. Result is cached per URL (keyed by size+mtime), so repeated
+    /// calls across the import/compositor/source/audio paths don't re-walk
+    /// the (10 GB+) file.
     public static func scanAudioIndex(url: URL) throws -> ExtendedIndex {
+        let validity = validityKey(url)
+        cacheLock.lock()
+        if let cached = indexCache[url.path], cached.validity == validity {
+            if let i = cacheOrder.firstIndex(of: url.path) {
+                cacheOrder.remove(at: i); cacheOrder.append(url.path)
+            }
+            cacheLock.unlock()
+            return cached.index
+        }
+        cacheLock.unlock()
+
+        let result = try scanAudioIndexUncached(url: url)
+
+        cacheLock.lock()
+        indexCache[url.path] = (validity, result)
+        cacheOrder.removeAll { $0 == url.path }
+        cacheOrder.append(url.path)
+        while cacheOrder.count > cacheCap, let oldest = cacheOrder.first {
+            cacheOrder.removeFirst()
+            indexCache.removeValue(forKey: oldest)
+        }
+        cacheLock.unlock()
+        return result
+    }
+
+    private static func scanAudioIndexUncached(url: URL) throws -> ExtendedIndex {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
             throw ReadError.cannotOpen(url.lastPathComponent)
         }

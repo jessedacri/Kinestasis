@@ -176,16 +176,6 @@ public final class TimelineAudioPipeline {
         pairedExtLeftSeconds: Double?,
         pairedExtRightSeconds: Double?
     ) async -> TrackBuffer? {
-        let decoded: ClipAudioLoader.DecodedAudio
-        do {
-            decoded = try await loader.load(clipID: source.id, url: source.url)
-        } catch {
-            PreemDebugLog.log("[TimelineAudio] decode failed for \(source.name): \(error)")
-            return nil
-        }
-        guard decoded.channels.count >= 1 else { return nil }
-
-        let totalFrames = decoded.channels[0].count
         let extLeftSec = pairedExtLeftSeconds ?? 0
         let extRightSec = pairedExtRightSeconds ?? 0
 
@@ -193,35 +183,30 @@ public final class TimelineAudioPipeline {
         // paired extensions on either side. The buffer's timeline
         // start sits at (placed.timelineRange.start - extLeftSec) so
         // the pre-cut dissolve region overlaps with the outgoing
-        // clip's tail.
+        // clip's tail. The buffer reads source starting at the clip's
+        // in-point (extensions just shift the timeline placement, not
+        // the source read). Out-of-range source frames fill silence.
         let inFrame = secondsToFrames(placed.sourceRange.start.seconds)
         let sliceLength = secondsToFrames(placed.timelineRange.duration.seconds + extLeftSec + extRightSec)
         guard sliceLength > 0 else { return nil }
 
-        PreemDebugLog.log("[TimelineAudio] \(source.name): src=\(totalFrames)f extL=\(extLeftSec)s extR=\(extRightSec)s srcStart=\(inFrame) len=\(sliceLength) timeline=[\(placed.timelineRange.start.seconds - extLeftSec), \(placed.timelineRange.end.seconds + extRightSec))")
-
-        // The buffer reads source starting at the clip's in-point. The
-        // pre-cut audio of an incoming clip's paired transition uses
-        // the SAME source frames the clip would normally play — the
-        // buffer is just shifted earlier on the timeline. This gives
-        // incoming clips real audio during the fade-in (matching the
-        // shifted video) rather than silence-from-pre-handles.
-        // Out-of-range source indices fill silence (typical when the
-        // clip's source ends before the buffer does).
-        let channelCount = decoded.channels.count
-        var rawChannels: [[Float]] = []
-        rawChannels.reserveCapacity(channelCount)
-        for ch in 0..<channelCount {
-            var slice = [Float](repeating: 0, count: sliceLength)
-            let src = decoded.channels[ch]
-            for i in 0..<sliceLength {
-                let srcIdx = inFrame + i
-                if srcIdx >= 0, srcIdx < totalFrames {
-                    slice[i] = src[srcIdx]
-                }
-            }
-            rawChannels.append(slice)
+        // Decode ONLY this clip's span (zero-padded). For MXF this reads
+        // just the covering packets — a trimmed clip from a long source
+        // costs ms, not a whole-track decode.
+        var rawChannels: [[Float]]
+        do {
+            rawChannels = try await loader.loadRange(
+                clipID: source.id, url: source.url,
+                startFrame: inFrame, frameCount: sliceLength
+            )
+        } catch {
+            PreemDebugLog.log("[TimelineAudio] decode failed for \(source.name): \(error)")
+            return nil
         }
+        guard let firstCh = rawChannels.first, !firstCh.isEmpty else { return nil }
+        let channelCount = rawChannels.count
+
+        PreemDebugLog.log("[TimelineAudio] \(source.name): srcStart=\(inFrame) len=\(sliceLength) ch=\(channelCount) timeline=[\(placed.timelineRange.start.seconds - extLeftSec), \(placed.timelineRange.end.seconds + extRightSec))")
 
         // Compute the fade-in / fade-out windows in samples.
         //   - Paired side: window = own half + partner half (so the cos
