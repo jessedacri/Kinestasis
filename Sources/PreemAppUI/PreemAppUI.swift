@@ -20,11 +20,13 @@ public extension Notification.Name {
     static let preemRenderInToOut = Notification.Name("preem.render.inToOut")
     static let preemExportSequence = Notification.Name("preem.export.sequence")
     static let preemShowEffectControls = Notification.Name("preem.effects.show")
+    static let preemShowAbout = Notification.Name("preem.about.show")
 }
 
 public struct PreemRootView: View {
     @StateObject private var workspace = WorkspaceModel()
     @State private var keyMonitor: Any?
+    @State private var showingAbout = false
 
     public init() {}
 
@@ -142,6 +144,12 @@ public struct PreemRootView: View {
                 onKeep:   { workspace.resolveMismatchKeepSequence() },
                 onCancel: { workspace.resolveMismatchCancel() }
             )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .preemShowAbout)) { _ in
+            showingAbout = true
+        }
+        .sheet(isPresented: $showingAbout) {
+            AboutView { showingAbout = false }
         }
         .onAppear { installKeyMonitor() }
         .onDisappear { removeKeyMonitor() }

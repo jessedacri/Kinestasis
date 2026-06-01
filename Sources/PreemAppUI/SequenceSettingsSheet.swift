@@ -79,6 +79,7 @@ public struct SequenceSettingsSheet: View {
                 Spacer()
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.bordered)
                 Button("OK") {
                     onConfirm(
                         sequenceName,
@@ -92,11 +93,13 @@ public struct SequenceSettingsSheet: View {
                     )
                 }
                 .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
         .frame(width: 540, height: 560)
+        .background(PreemTheme.bgPanel)
     }
 
     private var title: String {

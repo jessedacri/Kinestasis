@@ -100,7 +100,8 @@ let package = Package(
 
         .executableTarget(
             name: "PreemApp",
-            dependencies: ["PreemAppUI"]
+            dependencies: ["PreemAppUI"],
+            resources: [.process("Resources")]
         ),
 
         .testTarget(

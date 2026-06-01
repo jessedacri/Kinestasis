@@ -117,6 +117,8 @@ public struct PreemSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(PreemTheme.bg)
         .padding(20)
         .frame(minWidth: 420, minHeight: 200)
     }

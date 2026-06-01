@@ -16,6 +16,11 @@ struct PreemApp: App {
             PreemSettingsView()
         }
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Preem") {
+                    NotificationCenter.default.post(name: .preemShowAbout, object: nil)
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Project") {
                     NotificationCenter.default.post(name: .preemNewProject, object: nil)
@@ -86,6 +91,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // or they sit in the background with no Dock icon and no key window.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+
+        // Dock icon (SPM executable has no .app bundle/Info.plist icon, so
+        // set it at runtime). Preem's mark: timeline-track bars — the
+        // Polymerge waveform turned on its side.
+        if let url = Bundle.module.url(forResource: "PreemIcon", withExtension: "png"),
+           let img = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = img
+        }
 
         // The main window exists by now (SwiftUI builds it before
         // applicationDidFinishLaunching fires). Hook it up:

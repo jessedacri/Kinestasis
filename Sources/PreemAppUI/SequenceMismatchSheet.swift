@@ -61,14 +61,18 @@ public struct SequenceMismatchSheet: View {
             HStack {
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.bordered)
                 Spacer()
                 Button("Keep Sequence", action: onKeep)
+                    .buttonStyle(.bordered)
                 Button("Match Sequence to Clip", action: onMatch)
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
         .frame(width: 480)
+        .background(PreemTheme.bgPanel)
     }
 }

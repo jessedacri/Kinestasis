@@ -336,8 +336,8 @@ private struct FilmstripClipRow: View {
 
     private var metadataLine: some View {
         Text(secondaryLine)
-            .font(.system(size: 10))
-            .foregroundStyle(.secondary)
+            .font(PreemTheme.monoSmall)
+            .foregroundStyle(PreemTheme.textMuted)
             .lineLimit(1)
             .padding(.horizontal, 2)
     }
@@ -503,8 +503,8 @@ private struct FavoriteClipRow: View {
 
     private var metadataLine: some View {
         Text(String(format: "%@ · %.1fs", clip.name, favDur))
-            .font(.system(size: 10))
-            .foregroundStyle(.secondary)
+            .font(PreemTheme.monoSmall)
+            .foregroundStyle(PreemTheme.textMuted)
             .lineLimit(1)
             .padding(.horizontal, 2)
     }
