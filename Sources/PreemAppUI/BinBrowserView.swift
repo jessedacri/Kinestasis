@@ -17,7 +17,7 @@ struct BinBrowserView: View {
             Divider()
             scrollableContent
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(PreemTheme.bgPanel)
         .contentShape(Rectangle())
         .onTapGesture {
             workspace.focusedViewer = .bin
@@ -121,7 +121,7 @@ struct BinBrowserView: View {
                     .foregroundStyle(active ? Color.white : Color.secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(active ? Color.accentColor : Color.clear)
+                    .background(active ? PreemTheme.accent : Color.clear)
                     .contentShape(Rectangle())
                     .onTapGesture { workspace.binFilter = f }
             }
@@ -206,7 +206,7 @@ private struct FilmstripClipRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(isActive ? Color.accentColor.opacity(0.10) : Color.clear)
+        .background(isActive ? PreemTheme.accent.opacity(0.10) : Color.clear)
         .onAppear {
             if !clip.videoTracks.isEmpty {
                 workspace.previewCache.ensureThumbnails(clipID: clip.id, url: clip.url)
@@ -238,11 +238,11 @@ private struct FilmstripClipRow: View {
                 // In/Out selection band (only when this is the active clip).
                 if isActive, let band = selectionBand(width: w) {
                     Rectangle()
-                        .fill(Color.accentColor.opacity(0.22))
+                        .fill(PreemTheme.accent.opacity(0.22))
                         .frame(width: band.width, height: geo.size.height)
                         .offset(x: band.x, y: 0)
                         .overlay(alignment: .leading) {
-                            Rectangle().fill(Color.accentColor).frame(width: 1.5)
+                            Rectangle().fill(PreemTheme.accent).frame(width: 1.5)
                                 .offset(x: band.x)
                         }
                 }
@@ -262,7 +262,7 @@ private struct FilmstripClipRow: View {
             }
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(isActive ? Color.accentColor : Color.black.opacity(0.4),
+                    .stroke(isActive ? PreemTheme.accent : Color.black.opacity(0.4),
                             lineWidth: isActive ? 1.5 : 0.5)
             )
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
@@ -557,7 +557,7 @@ private struct WaveformStrip: View {
                 path.move(to: CGPoint(x: x, y: mid - amp))
                 path.addLine(to: CGPoint(x: x, y: mid + amp))
             }
-            ctx.stroke(path, with: .color(.accentColor.opacity(0.7)), lineWidth: 1)
+            ctx.stroke(path, with: .color(PreemTheme.accent.opacity(0.7)), lineWidth: 1)
         }
         .background(Color.black.opacity(0.4))
     }
@@ -585,7 +585,7 @@ private struct SlateBadge: View {
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
-            .background(Color.accentColor.opacity(0.85))
+            .background(PreemTheme.accent.opacity(0.85))
             .foregroundStyle(Color.white)
             .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
     }
@@ -599,7 +599,7 @@ private struct SequenceRow: View {
         HStack(spacing: 8) {
             Image(systemName: "rectangle.stack.fill")
                 .frame(width: 18)
-                .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                .foregroundStyle(isActive ? PreemTheme.accent : .secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(sequence.name)
                     .font(.system(size: 12, weight: isActive ? .semibold : .regular))
@@ -613,7 +613,7 @@ private struct SequenceRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
-        .background(isActive ? Color.accentColor.opacity(0.22) : Color.clear)
+        .background(isActive ? PreemTheme.accent.opacity(0.22) : Color.clear)
     }
 
     private var secondaryLine: String {

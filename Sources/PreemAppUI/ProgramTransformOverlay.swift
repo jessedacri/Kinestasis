@@ -85,7 +85,7 @@ private struct TransformHandles: View {
             // Visual chrome stays easy to grab; the rotated picture sits
             // inside this box.
             Rectangle()
-                .stroke(Color.accentColor.opacity(0.85), lineWidth: 1.5)
+                .stroke(PreemTheme.accent.opacity(0.85), lineWidth: 1.5)
                 .frame(width: outer.width, height: outer.height)
                 .position(x: outer.midX, y: outer.midY)
 
@@ -94,7 +94,7 @@ private struct TransformHandles: View {
             if visible != outer {
                 Rectangle()
                     .strokeBorder(
-                        Color.accentColor.opacity(0.55),
+                        PreemTheme.accent.opacity(0.55),
                         style: StrokeStyle(lineWidth: 1, dash: [3, 3])
                     )
                     .frame(width: visible.width, height: visible.height)
@@ -218,7 +218,7 @@ private struct TransformHandles: View {
             }
         }()
         Rectangle()
-            .fill(Color.accentColor)
+            .fill(PreemTheme.accent)
             .frame(width: 10, height: 10)
             .position(pos)
             .onHover { hovering in
@@ -285,7 +285,7 @@ private struct TransformHandles: View {
         }()
         let isVertical = (idx == 1 || idx == 3) // R / L → horizontal scale = vertical-bar handle
         Rectangle()
-            .fill(Color.accentColor.opacity(0.9))
+            .fill(PreemTheme.accent.opacity(0.9))
             .frame(width: isVertical ? 4 : 16, height: isVertical ? 16 : 4)
             .position(pos)
             .onHover { hovering in
@@ -344,11 +344,11 @@ private struct TransformHandles: View {
                 p.move(to: CGPoint(x: dest.midX, y: dest.minY))
                 p.addLine(to: knobPos)
             }
-            .stroke(Color.accentColor.opacity(0.7), lineWidth: 1)
+            .stroke(PreemTheme.accent.opacity(0.7), lineWidth: 1)
 
             // The knob itself — a small circle.
             Circle()
-                .fill(Color.accentColor)
+                .fill(PreemTheme.accent)
                 .frame(width: 10, height: 10)
                 .position(knobPos)
                 .onHover { hovering in

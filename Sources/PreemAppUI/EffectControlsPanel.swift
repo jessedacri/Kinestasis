@@ -36,7 +36,7 @@ struct EffectControlsContent: View {
             Divider()
             footer
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(PreemTheme.bgPanel)
     }
 
     private var emptyState: some View {
@@ -138,7 +138,7 @@ struct EffectControlsContent: View {
                 } label: {
                     Image(systemName: scaleLocked ? "link" : "link.badge.plus")
                         .font(.system(size: 11))
-                        .foregroundStyle(scaleLocked ? Color.accentColor : Color.secondary)
+                        .foregroundStyle(scaleLocked ? PreemTheme.accent : Color.secondary)
                 }
                 .buttonStyle(.plain)
                 .help(scaleLocked ? "X/Y linked — drag X or Y to scale uniformly" : "X/Y independent — drag each axis separately")
@@ -396,7 +396,7 @@ struct EffectControlsContent: View {
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+                    .fill(PreemTheme.bgCard.opacity(0.6))
             )
         }
     }

@@ -30,7 +30,7 @@ struct ColorPanelContent: View {
                 }
             }
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(PreemTheme.bgPanel)
     }
 
     private var header: some View {
@@ -177,7 +177,7 @@ struct ColorPanelContent: View {
             } label: {
                 Image(systemName: keyed ? "stopwatch.fill" : "stopwatch")
                     .font(.system(size: 10))
-                    .foregroundStyle(keyed ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(keyed ? PreemTheme.accent : Color.secondary)
             }
             .buttonStyle(.borderless)
             .frame(width: 14)

@@ -24,7 +24,7 @@ struct ExportSheet: View {
                 .frame(minWidth: 440, idealWidth: 520)
         }
         .frame(minWidth: 760, idealWidth: 820, minHeight: 560, idealHeight: 620)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(PreemTheme.bgPanel)
         .onAppear { syncAspectRatioFromCurrent() }
     }
 
@@ -62,7 +62,7 @@ struct ExportSheet: View {
                 .padding(.vertical, 4)
             }
         }
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(PreemTheme.bgCard)
     }
 
     private func presetRow(_ preset: ExportPreset) -> some View {
@@ -70,7 +70,7 @@ struct ExportSheet: View {
         return HStack(alignment: .top, spacing: 8) {
             Image(systemName: iconForGroup(preset.group))
                 .font(.system(size: 12))
-                .foregroundStyle(selected ? Color.accentColor : .secondary)
+                .foregroundStyle(selected ? PreemTheme.accent : .secondary)
                 .frame(width: 16, height: 16)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
@@ -88,7 +88,7 @@ struct ExportSheet: View {
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 4)
-                .fill(selected ? Color.accentColor.opacity(0.18) : Color.clear)
+                .fill(selected ? PreemTheme.accent.opacity(0.18) : Color.clear)
                 .padding(.horizontal, 6)
         )
         .contentShape(Rectangle())
@@ -171,7 +171,7 @@ struct ExportSheet: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(PreemTheme.bgPanel)
     }
 
     // MARK: - Format section
@@ -239,7 +239,7 @@ struct ExportSheet: View {
                             if lockAspect { syncAspectRatioFromCurrent() }
                         } label: {
                             Image(systemName: lockAspect ? "lock.fill" : "lock.open")
-                                .foregroundStyle(lockAspect ? Color.accentColor : .secondary)
+                                .foregroundStyle(lockAspect ? PreemTheme.accent : .secondary)
                         }
                         .buttonStyle(.plain)
                         .help("Lock aspect ratio")
@@ -410,7 +410,7 @@ struct ExportSheet: View {
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+                    .fill(PreemTheme.bgCard.opacity(0.6))
             )
         }
     }

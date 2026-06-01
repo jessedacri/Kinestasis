@@ -35,6 +35,10 @@ public struct PreemRootView: View {
             // of the system appearance. Forcing dark keeps the bin +
             // toolbar from washing out against the dark timeline.
             .preferredColorScheme(.dark)
+            // Brand accent (amber) drives every SwiftUI control's tint —
+            // buttons, pickers, segmented controls, toggles. Polymerge family.
+            .tint(PreemTheme.accent)
+            .background(PreemTheme.bg)
     }
 
     private var content: some View {
@@ -364,7 +368,7 @@ private struct FocusBorder: ViewModifier {
         content.overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(
-                    isFocused ? Color.accentColor.opacity(0.7) : Color.clear,
+                    isFocused ? PreemTheme.accent.opacity(0.7) : Color.clear,
                     lineWidth: 1
                 )
                 .allowsHitTesting(false)
@@ -410,7 +414,7 @@ private struct TimelineWithZoomBar: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color(NSColor.windowBackgroundColor))
+            .background(PreemTheme.bgPanel)
         }
     }
 }

@@ -30,7 +30,7 @@ struct ThinSlider: View {
                     .fill(Color.secondary.opacity(0.22))
                     .frame(height: trackHeight)
                 Capsule()
-                    .fill(Color.accentColor.opacity(0.85))
+                    .fill(PreemTheme.accent.opacity(0.85))
                     .frame(width: CGFloat(frac) * width, height: trackHeight)
                 Capsule()
                     .fill(Color.white)

@@ -19,9 +19,9 @@ struct ProgramViewer: View {
             HStack {
                 Text("Program")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(workspace.focusedViewer == .program ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(workspace.focusedViewer == .program ? PreemTheme.accent : Color.secondary)
                 if workspace.focusedViewer == .program {
-                    Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+                    Circle().fill(PreemTheme.accent).frame(width: 6, height: 6)
                 }
                 Spacer()
                 // Drop-warning chip lives in the header. The HStack is
@@ -74,7 +74,7 @@ struct ProgramViewer: View {
             // Fixed header height — the drop chip insertion/removal
             // never shifts the program content below.
             .frame(height: 28)
-            .background(Color(NSColor.windowBackgroundColor))
+            .background(PreemTheme.bgPanel)
 
             Divider()
 

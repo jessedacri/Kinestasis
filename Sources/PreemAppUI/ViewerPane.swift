@@ -109,7 +109,7 @@ struct ViewerPane: View {
             }
         }
         .frame(height: 26)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(PreemTheme.bgPanel)
     }
 
     @ViewBuilder
@@ -125,7 +125,7 @@ struct ViewerPane: View {
                 .font(.system(size: 11, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(
                     isActive
-                        ? (isFocused ? Color.accentColor : Color.primary)
+                        ? (isFocused ? PreemTheme.accent : Color.primary)
                         : Color.secondary
                 )
             accessory()
@@ -136,7 +136,7 @@ struct ViewerPane: View {
             ZStack(alignment: .bottom) {
                 Color.clear
                 Rectangle()
-                    .fill(isActive ? Color.accentColor : Color.clear)
+                    .fill(isActive ? PreemTheme.accent : Color.clear)
                     .frame(height: 2)
             }
         )
@@ -234,7 +234,7 @@ struct ViewerPane: View {
                 )
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
-                .background(Color(NSColor.windowBackgroundColor))
+                .background(PreemTheme.bgPanel)
             }
         }
     }
@@ -268,7 +268,7 @@ private struct ScrubBar: View {
                             let x0 = (inMark / duration) * geo.size.width
                             let x1 = (outMark / duration) * geo.size.width
                             Rectangle()
-                                .fill(Color.accentColor.opacity(0.35))
+                                .fill(PreemTheme.accent.opacity(0.35))
                                 .frame(width: max(2, x1 - x0), height: 4)
                                 .position(x: (x0 + x1) / 2, y: geo.size.height / 2)
                         }
@@ -335,7 +335,7 @@ private struct ScrubBar: View {
 
     @ViewBuilder
     private func markBracket(direction: BracketDir) -> some View {
-        let color = Color.accentColor
+        let color = PreemTheme.accent
         Path { p in
             switch direction {
             case .leading:
@@ -373,7 +373,7 @@ private extension Text {
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
             .foregroundStyle(active ? Color.white : Color.secondary)
-            .background(active ? Color.accentColor : Color.secondary.opacity(0.15))
+            .background(active ? PreemTheme.accent : Color.secondary.opacity(0.15))
             .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
     }
 }
@@ -489,7 +489,7 @@ private struct SourcePPEHost: NSViewRepresentable {
                 audioTrackCount: clip.audioTracks.count,
                 audioSampleRate: clip.audioTracks.first?.sampleRate,
                 audioChannelCount: clip.audioTracks.first?.channelCount ?? 0,
-                color: .accentColor
+                color: PreemTheme.accent
             )
             cachedVideo = video
             cachedClipID = clip.id
