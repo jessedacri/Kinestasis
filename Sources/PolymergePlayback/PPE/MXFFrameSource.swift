@@ -64,6 +64,16 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
     private var pendingCont: (index: Int, cont: CheckedContinuation<PPEDecodedFrame?, Error>)?
     private var seekGen = 0               // bumped on seek/teardown; stale callbacks no-op
 
+    // H.264 streams can carry IN-BAND parameter sets that change mid-clip —
+    // e.g. footage redacted by re-encoding a section with a different SPS/PPS
+    // that reuses sps_id/pps_id 0. Decoding such a frame against frame 0's
+    // format description yields garbage. So we build a format description from
+    // EACH frame's own SPS/PPS (cached by parameter-set bytes) and recreate the
+    // VT session whenever it changes. `currentSessionFormat` is the format the
+    // live session was built for. All mutated on `ioQueue`.
+    private var currentSessionFormat: CMVideoFormatDescription?
+    private var formatCache: [Data: CMVideoFormatDescription] = [:]
+
     enum CodecKind {
         case h264
         case prores
@@ -215,6 +225,7 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
                 VTDecompressionSessionWaitForAsynchronousFrames(s)
                 VTDecompressionSessionInvalidate(s)
                 self.vtSession = nil
+                self.currentSessionFormat = nil
             }
             try? self.readHandle?.close()
             self.readHandle = nil
@@ -228,7 +239,10 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
 
     private func ensureResources() {
         if readHandle == nil { readHandle = try? FileHandle(forReadingFrom: url) }
-        if vtSession == nil { vtSession = try? Self.makeDecompressionSession(formatDescription: formatDescription) }
+        if vtSession == nil {
+            vtSession = try? Self.makeDecompressionSession(formatDescription: formatDescription)
+            currentSessionFormat = vtSession != nil ? formatDescription : nil
+        }
     }
 
     /// Keep the VT pipeline filled up to `maxAhead` frames in flight +
@@ -238,24 +252,56 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
         ensureResources()
         guard vtSession != nil, readHandle != nil else { return }
         while inFlight + ready.count < maxAhead && readIndex < index.frames.count {
-            let i = readIndex
-            readIndex += 1
-            submitFrame(i)
+            // submitFrame returns false when it needs to switch the VT
+            // session to a new parameter set but frames are still in flight —
+            // leave readIndex put and retry once the pipeline drains.
+            if submitFrame(readIndex) {
+                readIndex += 1
+            } else {
+                break
+            }
         }
     }
 
     /// Read frame `idx` off disk and submit it to VT for async decode.
-    private func submitFrame(_ idx: Int) {
-        guard idx < index.frames.count, let handle = readHandle, let session = vtSession else { return }
+    /// Returns `false` when the frame needs a different VT session (its
+    /// parameter set changed) but frames are still in flight — the caller
+    /// must not advance and should retry after the pipeline drains. Returns
+    /// `true` once the frame is submitted (or skipped on a recoverable read
+    /// error), i.e. the cursor may advance.
+    @discardableResult
+    private func submitFrame(_ idx: Int) -> Bool {
+        guard idx < index.frames.count, let handle = readHandle else { return true }
         let ref = index.frames[idx]
         let gen = seekGen
         do {
             try handle.seek(toOffset: ref.payloadOffset)
             let len = Int(ref.payloadLength)
-            guard let raw = try handle.read(upToCount: len), raw.count == len else { return }
+            guard let raw = try handle.read(upToCount: len), raw.count == len else { return true }
             let pts = CMTime(value: Int64(idx) * Int64(frameRateDen), timescale: frameRateNum)
             let duration = CMTime(value: Int64(frameRateDen), timescale: frameRateNum)
-            let sampleBuffer = try buildSampleBuffer(for: raw, pts: pts, duration: duration)
+
+            // Resolve THIS frame's format from its own in-band SPS/PPS. If it
+            // differs from the live session's, the session must be rebuilt —
+            // but only once all in-flight frames (decoded against the old
+            // format) have drained, so defer when inFlight > 0.
+            let frameFormat = formatForFrame(raw)
+            if let frameFormat,
+               !(currentSessionFormat.map { CMFormatDescriptionEqual($0, otherFormatDescription: frameFormat) } ?? false) {
+                if inFlight > 0 { return false }   // drain first, then retry
+                if let s = vtSession {
+                    VTDecompressionSessionWaitForAsynchronousFrames(s)
+                    VTDecompressionSessionInvalidate(s)
+                }
+                vtSession = try? Self.makeDecompressionSession(formatDescription: frameFormat)
+                currentSessionFormat = vtSession != nil ? frameFormat : nil
+            }
+            guard let session = vtSession else { return true }
+            let sampleBuffer = try buildSampleBuffer(
+                for: raw,
+                format: frameFormat ?? currentSessionFormat ?? formatDescription,
+                pts: pts, duration: duration
+            )
 
             inFlight += 1
             var infoFlags: VTDecodeInfoFlags = []
@@ -279,9 +325,28 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
                 }
             )
             if status != noErr { inFlight -= 1 }
+            return true
         } catch {
-            // I/O or sample-buffer error on this frame — skip it.
+            // I/O or sample-buffer error on this frame — skip it (advance).
+            return true
         }
+    }
+
+    /// Build (and cache) the H.264 format description for a frame from its
+    /// own in-band SPS/PPS. Returns nil when the frame carries no parameter
+    /// sets (caller falls back to the current/base format) or for ProRes.
+    private func formatForFrame(_ frameData: Data) -> CMVideoFormatDescription? {
+        guard codec == .h264 else { return nil }
+        let nals = AnnexBParser.parse(frameData)
+        guard let sps = nals.first(where: { $0.nalType == 7 }),
+              let pps = nals.first(where: { $0.nalType == 8 }) else { return nil }
+        var key = Data()
+        key.append(sps.rawBytes)
+        key.append(pps.rawBytes)
+        if let cached = formatCache[key] { return cached }
+        guard let fmt = try? Self.buildH264FormatDescription(sps: sps.rawBytes, pps: pps.rawBytes) else { return nil }
+        formatCache[key] = fmt
+        return fmt
     }
 
     /// Deliver the consumer's awaited frame once it's decoded, or nil at EOF
@@ -314,6 +379,7 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
     /// ProRes is a raw passthrough.
     private func buildSampleBuffer(
         for data: Data,
+        format: CMVideoFormatDescription,
         pts: CMTime,
         duration: CMTime
     ) throws -> CMSampleBuffer {
@@ -385,7 +451,7 @@ public final class MXFFrameSource: VideoFrameSource, @unchecked Sendable {
             dataReady: true,
             makeDataReadyCallback: nil,
             refcon: nil,
-            formatDescription: formatDescription,
+            formatDescription: format,
             sampleCount: 1,
             sampleTimingEntryCount: 1,
             sampleTimingArray: &timing,

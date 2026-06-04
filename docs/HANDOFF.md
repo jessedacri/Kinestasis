@@ -8,7 +8,7 @@ Snapshot for the next session. Last updated 2026-06-04. Pairs with `CLAUDE.md` (
 
 **Git topology — IMPORTANT:**
 - **`main`** ends at `cb8e117` — branding (`feature/branding`) was fast-forward-merged in on 2026-06-04, so `main` now has color + MXF + branding + the two timeline fixes (multi-select drag, ⌘F program fullscreen).
-- **`feature/multitrack-audio-export`** (current branch) = `main` + multi-track audio export (see its own section below). Merge to `main` when happy.
+- **`feature/multitrack-audio-export`** (current branch) = `main` + multi-track audio export (experimental, see its own section below) + **MXF mid-stream parameter-set / redacted-footage decode fix** (separate commit; see the MXF support section). Two independent changes ride this branch — split if you want separate PRs.
 
 **This session (2026-05-30 → 06-04) shipped:**
 - **FCP-style bin** — filmstrip browser, skimming, favorites/subclips, fast still-vs-PPE source viewer. → `BROWSER.md`.
@@ -126,7 +126,10 @@ Net: skim shows an instant (thumbnail) frame, sharpens within ~tens of ms, and r
 
 Key files: `BinBrowserView.swift` (rewritten — `FilmstripClipRow`, `FavoriteClipRow`, `Filmstrip`, `WaveformStrip`, filter toggle), `WorkspaceModel.swift` (`loadSourceClip`/`skimSource` ~:1390, `favoriteSourceSelection`/`removeFavorite`/`renameFavorite` ~:1430, `sourceMarksActive` ~:117, `binFilter` ~:97), `PreemAppUI.swift` (I/O routing via `sourceMarksActive`, new `f`/`F` case ~:255), `FocusedViewer.swift` (`BinFilter` enum), `PreemCore/MediaPool.swift` (`FavoriteRange` + `ClipSource.favorites` + custom decode).
 
-## Multi-track audio export — DONE (2026-06-04)
+## Multi-track audio export — SHIPPED BUT UNTESTED / EXPERIMENTAL (2026-06-04)
+
+> ⚠️ **Experimental — not yet verified with real footage.** The code builds, the synthetic-WAV unit tests pass, and the app launches, but no multi-track `.mov` has been opened in another NLE / `ffprobe` against real multicam material. Treat as experimental until a real-footage export is confirmed (discrete tracks present, channel layouts correct, A/V sync intact).
+
 
 The export sheet's **Audio → Tracks** picker now offers three layouts (MOV container only; audio-only export stays a single mixed stream):
 - **Single (Mixdown)** — default; every timeline audio track summed to one output track (unchanged behavior).
@@ -212,6 +215,8 @@ AVFoundation can't open MXF, but PPE has a native demuxer (`MXFFrameSource`, Can
   - **Shared single-walk index — DONE (2026-06-01).** `MXFEssenceReader` now caches the combined picture+sound `ExtendedIndex` per URL (keyed by size+mtime, LRU 16); `scanIndex` delegates to `scanAudioIndex`. So import/compositor/source/audio share ONE file walk instead of each re-scanning. Verified: cold walk 1.75s, subsequent video/audio index lookups ~0ms.
   - **Windowed source-viewer audio — DONE (2026-06-01).** `SourceAudioPipeline` decodes only a 60s window around the play position for MXF (via `loadRange`), rebuilding on out-of-window seeks; non-MXF keeps the whole-clip buffer. So source-viewer MXF audio starts fast instead of whole-track decode.
   - **Skipped: batched packet reads.** Sound essence is frame-wrapped and interleaved with (large 4K) video, so packets for one track are ~1 video-frame apart on disk — reading contiguous spans would pull MBs of video between them (worse I/O). The cost is seek latency, not throughput; ranged + cached decode already covers it. A per-content-package read (all tracks' sound packets of one frame are contiguous) could cut seeks ~4× if ever needed.
+
+**Mid-stream parameter-set changes (redacted footage) — DONE (2026-06-04).** A redaction utility (the user's own tool) rewrites sections of an XF-AVC clip by re-encoding those frames with a DIFFERENT H.264 SPS/PPS that **reuses `sps_id`/`pps_id` 0** (single-slice, profile 122 **level 4.2** vs the normal 8-slice **level 5.1** — frames go from ~2 MB to ~15 KB, decoding to a near-black redacted picture; dims stay 3840×2160). `MXFFrameSource` originally built ONE `CMVideoFormatDescription` from frame 0 and reused it for every frame, so redacted-section frames decoded against the wrong parameter set → garbage / blank filmstrip thumbnails (ffmpeg's MXF demuxer doesn't even surface the change — `-c copy` of redacted vs original is byte-identical for the un-redacted frames). **Fix:** `MXFFrameSource` now resolves each frame's format from its OWN in-band SPS/PPS (`formatForFrame`, cached by parameter-set bytes) and recreates the VT session whenever it changes — deferring the switch until in-flight decodes drain (`submitFrame` returns false → `pump` rolls back `readIndex`). Within a contiguous section the param sets are identical so the cache hits and no session churn happens; only the section boundaries pay a session rebuild. Verified by decoding across the boundary (normal frame meanB≈72, redacted≈3, both valid 3840×2160) — this fixes filmstrip thumbnails, source-viewer skim/play, compositor, and export, since all route through `MXFFrameSource`. The legacy `MXFH264Player` (non-PPE `VideoPlayerController` path, unused by Preem) was NOT changed. Test file: `/Users/jessedacri/Movies/aridact test/B032C448_260529MX_CANON_R.MXF` (redacted section ~frame 2108+).
 
 **Remaining MXF gaps (follow-ups):**
 - **Redundant index scans** — import, source-still, compositor, and thumbnails each `MXFFrameSource.load` (≈1.7s index scan for the 10GB file) independently. A shared index cache keyed by URL would cut startup cost.
