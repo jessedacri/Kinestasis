@@ -2,6 +2,20 @@
 
 Snapshot for the next session. Last updated 2026-06-04. Pairs with `CLAUDE.md` (developer guide), `ARCHITECTURE.md` (load-bearing decisions), `TIMELINE.md` (editing patterns), `BROWSER.md` (bin / skimming / favorites), `COLOR.md` (grading), `BRANDING.md` (theme), `COMPOSITOR.md` (playback + render runtime), `ROADMAP.md` (milestones), `APPLE-SILICON.md` (API matrix).
 
+## ⏯️ RESUME HERE (2026-06-04, end of session — user rebooted)
+
+**Where we are right now.** Working tree is **clean**, build is **clean** (`swift build`), **45 unit tests pass** (`swift test`). On branch **`feature/multitrack-audio-export`**, which sits on top of `main` (`cb8e117`) with exactly two independent commits:
+
+1. **`834d164` — Multi-track audio export.** ⚠️ **Experimental / NOT verified with real footage.** Export sheet → Audio → **Tracks** picker: Single (Mixdown, default) / Separate Tracks / Separate Tracks (Source Channels). MOV only. Builds, synthetic-WAV unit tests pass, app launches. See the "Multi-track audio export" section below for the full design + file map.
+2. **`ee3fce5` — MXF mid-stream parameter-set / redacted-footage decode fix.** ✅ **Verified** on the real redacted file. See the "Mid-stream parameter-set changes (redacted footage)" subsection under MXF support.
+
+**Decisions waiting for you (in priority order):**
+1. **Verify multi-track audio export with real multicam footage** — export a sequence with clips on ≥2 audio tracks in each of the three layouts; confirm with `ffprobe`/another NLE that the .mov has the expected discrete audio tracks, correct channel layouts, and A/V sync. This is the one untested piece.
+2. **Decide how to land the branch** — the two commits are independent. Either merge `feature/multitrack-audio-export` → `main` as-is, OR split: cherry-pick `ee3fce5` (MXF fix, low-risk, verified) to `main` now and keep multi-track audio on its branch until verified. The MXF fix is safe to ship immediately; the audio export is the experimental one.
+3. Optional: the user said they'd already fixed the MXF redaction case in a forked PPE — worth diffing their approach against `ee3fce5` (per-frame `CMVideoFormatDescription` + VT-session recreation on parameter-set change). Mine is verified working on `B032C448_260529MX_CANON_R.MXF`.
+
+**Nothing is mid-edit / half-done** — both features are complete commits; the only open work is verification + the merge decision above. After that, the backlog resumes at "Other backlog (recommended order)" below (proxy pipeline is next).
+
 ## CURRENT STATUS (2026-06-04) — read this first
 
 **M1 + M2 complete; most of M3 shipped.** The app imports → cuts/trims/blades → drags (incl. multi-select) → fades → cross-dissolves → animates Transform/Crop with keyframes → **grades color (Lumetri-style)** → renders In→Out → exports ProRes/H.264/HEVC. **Native MXF** (Canon XF-AVC etc.) imports and plays (video + audio). The UI is branded as a **Polymerge sibling** (dark + amber).
