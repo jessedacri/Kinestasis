@@ -1,12 +1,32 @@
 # Preem — Handoff Notes
 
-Snapshot for the next session. Last updated 2026-05-29. Pairs with `CLAUDE.md` (developer guide), `ARCHITECTURE.md` (load-bearing decisions), `TIMELINE.md` (editing patterns), `BROWSER.md` (bin / skimming / favorites), `COMPOSITOR.md` (playback + render runtime), `ROADMAP.md` (milestones), `APPLE-SILICON.md` (API matrix).
+Snapshot for the next session. Last updated 2026-06-04. Pairs with `CLAUDE.md` (developer guide), `ARCHITECTURE.md` (load-bearing decisions), `TIMELINE.md` (editing patterns), `BROWSER.md` (bin / skimming / favorites), `COLOR.md` (grading), `BRANDING.md` (theme), `COMPOSITOR.md` (playback + render runtime), `ROADMAP.md` (milestones), `APPLE-SILICON.md` (API matrix).
 
-## Where things stand
+## CURRENT STATUS (2026-06-04) — read this first
+
+**M1 + M2 complete; most of M3 shipped.** The app imports → cuts/trims/blades → drags (incl. multi-select) → fades → cross-dissolves → animates Transform/Crop with keyframes → **grades color (Lumetri-style)** → renders In→Out → exports ProRes/H.264/HEVC. **Native MXF** (Canon XF-AVC etc.) imports and plays (video + audio). The UI is branded as a **Polymerge sibling** (dark + amber).
+
+**Git topology — IMPORTANT:**
+- **`main`** ends at `929bbe5` ("Color grading + native MXF support") — has everything through color grading + MXF, NO branding. This is the clean pre-branding restore point.
+- **`feature/branding`** (current branch) = `main` + branding (PreemTheme/dark chrome, icon, About, sheets, typography) + two timeline bug-fixes (multi-select drag, ⌘F program fullscreen). The timeline fixes ride this branch even though they're unrelated to branding.
+- **Decision for next session:** merge `feature/branding` → `main` when happy with the brand (or cherry-pick the two timeline fixes `ed9d85c` if branding needs more work first).
+
+**This session (2026-05-30 → 06-04) shipped:**
+- **FCP-style bin** — filmstrip browser, skimming, favorites/subclips, fast still-vs-PPE source viewer. → `BROWSER.md`.
+- **Lumetri-style color grading** — Basic Correction + RGB curves + `.cube` LUT, color-managed per-layer compositor (input log/gamma + gamut → linear working → display), WYSIWYG. → `COLOR.md`.
+- **Native MXF** — import probe, compositor + source-viewer decode (pipelined async VT), native PCM audio with ranged/windowed decode + a shared single KLV index walk. → "MXF support" section below.
+- **Branding** — `PreemTheme` (Polymerge palette), dark chrome, Dock icon (Polymerge waveform turned 90° → timeline-track bars), About panel, on-brand sheets, mono typography. **The timeline was deliberately left at its exact pre-branding rendering** (waveform legibility is a hard constraint). → `BRANDING.md`.
+- **Timeline fixes** — multi-select drag (preserve selection on mouse-down of a selected clip; drag moves all selected), and ⌘F Program fullscreen. → `TIMELINE.md`.
+
+**Older context** (pre-2026-05-30) follows below: M3 keyframes/transform push, the playback-chop hunt, and the cleanliness audit — all shipped and on `main`.
+
+---
+
+## Where things stand (historical — pre-2026-05-30)
 
 **M1 + M2 are functionally complete.** Big M3 chunks landed across the 2026-05-26 → 2026-05-28 push: pre-render + Export, unified realtime compositor, Transform/Crop, alpha-aware cross-dissolves — see prior HANDOFF entries (in git) for the May 26/27 details.
 
-**2026-05-29:** playback chop is **solved** (frame-boundary source sampling — see that section below) and the live path is now frame-accurate WYSIWYG. A full cleanliness/perf audit also shipped (see 2026-05-28 sections). All of it is on the `audit/cleanup-and-perf` branch — **merge to `main` next.** Two clearly-scoped follow-ups remain (pre-render cache reader stall; overlap-aware keying).
+**2026-05-29:** playback chop is **solved** (frame-boundary source sampling — see that section below) and the live path is now frame-accurate WYSIWYG. A full cleanliness/perf audit also shipped (see 2026-05-28 sections).
 
 **The 2026-05-28 push (this session) shipped:**
 
@@ -60,9 +80,10 @@ Order:
 3. `TIMELINE.md` — every user-facing editing pattern: tools, keymap, drag/drop, snapping, selection types, V/A linking, no-overlap invariant, undo batching, frame quantization, zoom, preview cache, focus model, In/Out marks.
 4. `BROWSER.md` — FCP-style bin: filmstrip skimming, still-vs-PPE source viewer state machine, `SkimFrameProvider`, favorites/subclips + filter, transport/marks routing.
 5. `COLOR.md` — Lumetri-style grading: Basic Correction + Curves, the color-managed per-layer compositor pipeline, `ColorGrade` model, color-management roadmap.
-6. `COMPOSITOR.md` — runtime architecture: playback state machine, audio pipelines, **realtime compositor**, transitions (cross-dissolve + solo fade), pre-render cache, transform/crop, keyframe sampling, timecode.
-7. `ROADMAP.md` — what's in M1 → M6+.
-8. `APPLE-SILICON.md` — which Apple API for which job, and why.
+6. `BRANDING.md` — the Polymerge-sibling theme: `PreemTheme` palette, dark chrome, icon, About, the timeline-stays-unbranded constraint, and what's on `feature/branding`.
+7. `COMPOSITOR.md` — runtime architecture: playback state machine, audio pipelines, **realtime compositor**, transitions (cross-dissolve + solo fade), pre-render cache, transform/crop, keyframe sampling, timecode.
+8. `ROADMAP.md` — what's in M1 → M6+.
+9. `APPLE-SILICON.md` — which Apple API for which job, and why.
 
 ## 2026-05-29 (second push) — FCP-style filmstrip bin + skimming + favorites (DONE)
 
@@ -266,11 +287,11 @@ AVFoundation can't open MXF, but PPE has a native demuxer (`MXFFrameSource`, Can
 
 ## State pointer
 
-- **App version**: M2 complete + most of M3 shipped. Playback engine hardened across 2026-05-28/29. **FCP-style filmstrip bin + skimming + favorites shipped 2026-05-29 (second push)** — see that section above; needs interactive footage verification. Remaining backlog: bin follow-ups (proxy-backed skim, persistent skim host, folders/smart collections, reject+keywords), cache↔live boundary micro-hiccup (tightening), multi-track audio export, proxy pipeline, bezier handles, rotated overlay chrome, keymap presets, `.preem` package, render-graph fusion.
-- **Git**: `main` holds everything. Worktree clean. Repo created 2026-05-28; `themarket.mp4` gitignored (large test footage).
-- **Polymerge**: forked in-tree on 2026-05-27. No external dep.
-- **Debug log**: `/tmp/preem-debug.log`. `PreemDebugLog.log(...)` wired into critical paths. Check it first when something behaves weird. Encoder heartbeat is `[Encoder] video N/M audio M/X @ Y fps`. (All the temporary playback telemetry from the 05-29 hunt has been removed.)
-- **Build**: `swift build -c release && swift run -c release Preem` for any real footage work. 30 unit tests (`swift test`), all passing.
-- **Playback chop**: SOLVED (frame-boundary source sampling + WYSIWYG decoupling). One known polish item left: the cache↔live boundary micro-hiccup.
+- **App version**: M2 complete + most of M3 shipped. This session added the FCP bin, Lumetri color grading, native MXF, and Polymerge-sibling branding (see CURRENT STATUS up top). Remaining backlog: **merge `feature/branding`→`main`**; bin follow-ups (proxy-backed skim, persistent skim host, folders/smart collections, reject+keywords); color (linear-light compositing, HDR output, color wheels/HSL secondary, scopes); MXF (Long-GOP keyframe-aware seek; batched packet reads); cache↔live boundary micro-hiccup; multi-track audio export; proxy pipeline; bezier handles; keymap presets; `.preem` package; render-graph fusion.
+- **Git**: `main` = `929bbe5` (through color+MXF, no branding). `feature/branding` (current) = main + branding + 2 timeline fixes; merge when happy. Worktree clean. `themarket.mp4` + `*.mxf` gitignored (large footage). Test footage: `B032C448_260529MX_CANON.MXF` (10GB Canon 4K All-Intra MXF, gitignored) is the MXF test file.
+- **Polymerge**: forked in-tree on 2026-05-27 (no external dep). Brand mirrors `/Users/jessedacri/polymerge/PolyMerge/Views/Components/Theme.swift`.
+- **Debug log**: `/tmp/preem-debug.log`. `PreemDebugLog.log(...)` wired into critical paths. Check it first when something behaves weird.
+- **Build**: `swift build -c release && swift run -c release Preem` for real footage. 41 unit tests (`swift test`), all passing.
+- **Constraints to respect**: never regress the playback frame-exact invariants (COMPOSITOR.md); don't re-brand the timeline clip/waveform rendering (BRANDING.md); keep the realtime compose off the main actor.
 
-Good luck. If something feels weird, check the debug log, then re-read `TIMELINE.md` (editing question) or `COMPOSITOR.md` (playback / render question).
+Good luck. If something feels weird, check the debug log, then re-read the relevant doc (`TIMELINE.md` editing · `COLOR.md` grading · `BRANDING.md` theme · `COMPOSITOR.md` playback/render).

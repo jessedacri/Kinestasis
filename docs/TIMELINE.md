@@ -29,6 +29,7 @@ Everything that happens between the user's mouse/keyboard and a mutation on `Pro
 | **⇧⌘5** | Open the Effect Controls inspector for the selected clip(s). |
 | **⇧Return** | Render In to Out — bake the marked range to a ProRes 422 LT segment in the per-project cache. |
 | **⌘E** | Open the Export Sequence sheet (preset rail + sectioned settings). |
+| **⌘F** | Toggle **Program fullscreen** — the Program viewer fills the window AND the window enters native macOS fullscreen so the picture fills the screen. ⌘F again or **Esc** exits. (`WorkspaceModel.programFullscreen`; `PreemRootView.setProgramFullscreen`.) |
 
 ## Pane focus model
 
@@ -74,6 +75,10 @@ The model mutates **horizontally** during the drag; `floatingDraggedClip: Floati
 
 **`mouseUp` must subtract `grab` from cursor X** when computing the commit position (same as `mouseDragged`). Don't use `timeForX(p.x)` raw or the clip jumps forward by the cursor-to-clip-start distance.
 
+### Multi-select drag (2026-06-04)
+
+Dragging when several clips are selected moves them all. On `mouseDown` over an already-selected clip the view **does not** re-select (which used to collapse the selection to that one clip); instead it captures every selected clip's original start (`multiDragOriginals`, via `captureClipStarts`) and, on drag, shifts them all by the grabbed clip's delta — **horizontal only**, spacing preserved, delta clamped so the earliest clip can't cross t=0. Wired through `Callbacks.moveSelectedClips` → `WorkspaceModel.moveSelectedClipsTo`. A plain click with no drag collapses to the clicked clip on `mouseUp` (`clickToCollapseID` + `dragDidMove`). Single-clip drag is unchanged (still supports vertical/cross-track moves); multi-drag is horizontal-only.
+
 ### Callback timing
 
 `view.callbacks.moveClip` fires synchronously via `MainActor.assumeIsolated`, NOT `Task { @MainActor ... }` — the Task hop introduces a one-runloop delay that produces a flicker frame where the model hasn't caught up to the user's release.
@@ -90,7 +95,7 @@ Three distinct selection types, mutated through dedicated `WorkspaceModel` metho
 
 | Type | Property | Trigger |
 |---|---|---|
-| Clip selection | `selectedClipIDs: Set<PlacedClipID>` | Click a clip; shift-click adds. Box-drag in empty space selects intersecting. |
+| Clip selection | `selectedClipIDs: Set<PlacedClipID>` | Click a clip; shift-click adds; box-drag in empty space selects intersecting. Mouse-down on an already-selected clip **preserves** the multi-selection (so a drag moves all of them); a plain click (no drag) collapses to that clip. |
 | Gap selection | `selectedGap: GapSelection?` | Click in empty space on a track between clips. |
 | Cut selection | `selectedCut: CutSelection?` | Click the small white grip between two abutting clips on the same track. |
 | Clip-edge selection | `selectedClipEdge: ClipEdgeSelection?` | Right-click a clip's left or right edge (for "Add Fade In/Out"). |
