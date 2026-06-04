@@ -103,6 +103,21 @@ public final class SequenceEncoder {
         public var audioChannelCount: Int
         public var audioSampleRate: Int
 
+        /// When true, the encoder writes one audio track per audible
+        /// timeline audio track (instead of a single mixdown). Requires
+        /// `audioSettingsBuilder` and a MOV container. Ignored for
+        /// audio-only export.
+        public var audioMultiTrack: Bool
+        /// When true (multi-track only), each output track keeps its
+        /// source clips' native channel count; otherwise each track is
+        /// downmixed to `audioChannelCount`.
+        public var audioPreserveSourceChannels: Bool
+        /// Builds per-track output settings for a given channel count.
+        /// Used only in multi-track mode (channel count varies per track
+        /// under preserve-channels). `audioOutputSettings` is the
+        /// single-track equivalent.
+        public var audioSettingsBuilder: (@Sendable (Int) -> [String: Any])?
+
         public var fileType: AVFileType
         public var progress: ((Double) -> Void)?
 
@@ -121,6 +136,9 @@ public final class SequenceEncoder {
             audioOutputSettings: [String: Any]? = nil,
             audioChannelCount: Int = 2,
             audioSampleRate: Int = 48_000,
+            audioMultiTrack: Bool = false,
+            audioPreserveSourceChannels: Bool = false,
+            audioSettingsBuilder: (@Sendable (Int) -> [String: Any])? = nil,
             fileType: AVFileType = .mov,
             progress: ((Double) -> Void)? = nil
         ) {
@@ -138,6 +156,9 @@ public final class SequenceEncoder {
             self.audioOutputSettings = audioOutputSettings
             self.audioChannelCount = audioChannelCount
             self.audioSampleRate = audioSampleRate
+            self.audioMultiTrack = audioMultiTrack
+            self.audioPreserveSourceChannels = audioPreserveSourceChannels
+            self.audioSettingsBuilder = audioSettingsBuilder
             self.fileType = fileType
             self.progress = progress
         }
@@ -230,21 +251,60 @@ public final class SequenceEncoder {
             adaptor = ad
         }
 
-        // ── Audio input ──────────────────────────────────────────────
-        var audioInput: AVAssetWriterInput?
-        var audioFormatDesc: CMAudioFormatDescription?
-        if let audioSettings = options.audioOutputSettings {
+        // ── Audio input(s) ───────────────────────────────────────────
+        // Each entry pairs a writer input with the float mix it's pumped
+        // from. The single-track mix is rendered after startWriting; the
+        // multi-track mixes are rendered HERE because their per-track
+        // channel counts must be known before the inputs are added.
+        // Source-side CMSampleBuffer format is always 32-bit float
+        // interleaved — AVAssetWriter transcodes to the output format.
+        struct PendingAudio {
+            let input: AVAssetWriterInput
+            let formatDesc: CMAudioFormatDescription
+            let channelCount: Int
+            var mix: [[Float]]          // empty == not rendered yet
+        }
+        var pendingAudio: [PendingAudio] = []
+
+        let wantsMultiTrack = options.audioMultiTrack
+            && !isAudioOnly
+            && options.audioSettingsBuilder != nil
+            && options.audioOutputSettings != nil
+
+        if wantsMultiTrack, let builder = options.audioSettingsBuilder {
+            let mixer = OfflineAudioMixdown(
+                sequence: sequence, mediaPool: mediaPool,
+                sampleRate: audioSampleRate, channelCount: audioChannelCount
+            )
+            let mixes = await mixer.renderPerTrack(
+                startSeconds: options.startSeconds, endSeconds: options.endSeconds,
+                preserveSourceChannels: options.audioPreserveSourceChannels
+            )
+            for mix in mixes {
+                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: builder(mix.channelCount))
+                input.expectsMediaDataInRealTime = false
+                guard writer.canAdd(input) else {
+                    PreemDebugLog.log("[Encoder] writer rejected audio track \(mix.label)")
+                    continue
+                }
+                writer.add(input)
+                let fmt = try Self.makeAudioFormatDescription(
+                    sampleRate: audioSampleRate, channelCount: mix.channelCount
+                )
+                pendingAudio.append(PendingAudio(input: input, formatDesc: fmt,
+                                                 channelCount: mix.channelCount, mix: mix.channels))
+            }
+            PreemDebugLog.log("[Encoder] multi-track audio: \(pendingAudio.count) track(s), preserveChannels=\(options.audioPreserveSourceChannels)")
+        } else if let audioSettings = options.audioOutputSettings {
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             input.expectsMediaDataInRealTime = false
             if writer.canAdd(input) {
                 writer.add(input)
-                audioInput = input
-                // Source-side CMSampleBuffer format is always 32-bit
-                // float interleaved — AVAssetWriter transcodes to the
-                // output format (PCM 16/24-bit, AAC, etc.).
-                audioFormatDesc = try Self.makeAudioFormatDescription(
+                let fmt = try Self.makeAudioFormatDescription(
                     sampleRate: audioSampleRate, channelCount: audioChannelCount
                 )
+                pendingAudio.append(PendingAudio(input: input, formatDesc: fmt,
+                                                 channelCount: audioChannelCount, mix: []))
             } else {
                 PreemDebugLog.log("[Encoder] writer rejected audio input")
                 if isAudioOnly {
@@ -275,42 +335,44 @@ public final class SequenceEncoder {
         let totalVideoFrames = isAudioOnly ? 0 : Int((rangeSeconds / secondsPerFrame).rounded())
         if !isAudioOnly && totalVideoFrames <= 0 {
             videoInput?.markAsFinished()
-            audioInput?.markAsFinished()
+            pendingAudio.forEach { $0.input.markAsFinished() }
             await writer.finishWriting()
             return
         }
 
-        // Pre-render audio. Fast and bounded; lets the audio pump just
-        // memcpy + interleave into CMSampleBuffers.
-        var audioMix: [[Float]] = []
-        var audioFrameCount = 0
-        if audioInput != nil {
+        // Single-track audio: render the mixdown now (multi-track mixes
+        // were pre-rendered above). Fast and bounded; lets the audio pump
+        // just memcpy + interleave into CMSampleBuffers.
+        if pendingAudio.count == 1 && pendingAudio[0].mix.isEmpty {
             let mixer = OfflineAudioMixdown(
                 sequence: sequence, mediaPool: mediaPool,
                 sampleRate: audioSampleRate, channelCount: audioChannelCount
             )
-            audioMix = await mixer.render(startSeconds: options.startSeconds, endSeconds: options.endSeconds)
-            audioFrameCount = audioMix.first?.count ?? 0
+            pendingAudio[0].mix = await mixer.render(
+                startSeconds: options.startSeconds, endSeconds: options.endSeconds
+            )
         }
 
-        if audioInput == nil && isAudioOnly {
+        if pendingAudio.isEmpty && isAudioOnly {
             writer.cancelWriting()
             throw EncoderError.writerCreate("Audio-only export needs an audio input.")
         }
 
+        let totalAudioFrames = pendingAudio.reduce(0) { $0 + ($1.mix.first?.count ?? 0) }
         let codecLabel = options.videoCodec?.rawValue ?? "audio-only"
-        PreemDebugLog.log("[Encoder] start: video=\(totalVideoFrames) frames @ \(width)x\(height) codec=\(codecLabel), audio=\(audioFrameCount) frames")
+        PreemDebugLog.log("[Encoder] start: video=\(totalVideoFrames) frames @ \(width)x\(height) codec=\(codecLabel), audioTracks=\(pendingAudio.count) audioFrames=\(totalAudioFrames)")
 
         // ── State shared across pump callbacks ───────────────────────
         let stateLock = NSLock()
         nonisolated(unsafe) var nextVideoFrame = 0
-        nonisolated(unsafe) var nextAudioFrame = 0
+        // One cursor per audio track; each pump writes only its own slot.
+        nonisolated(unsafe) var audioCursors = [Int](repeating: 0, count: pendingAudio.count)
         nonisolated(unsafe) var encodedVideo = 0
         nonisolated(unsafe) var lastLoggedFrame = 0
         nonisolated(unsafe) var pipelineError: Error?
         let startedAt = Date()
 
-        let audioWeight: Double = audioInput != nil ? 0.10 : 0.0
+        let audioWeight: Double = pendingAudio.isEmpty ? 0.0 : 0.10
         let videoWeight: Double = 1.0 - audioWeight
 
         func reportError(_ e: Error) {
@@ -325,7 +387,6 @@ public final class SequenceEncoder {
 
         // ── Video pump ───────────────────────────────────────────────
         let videoQueue = DispatchQueue(label: "preem.encode.video", qos: .userInitiated)
-        let audioQueue = DispatchQueue(label: "preem.encode.audio", qos: .userInitiated)
         let group = DispatchGroup()
 
         let progressCallback = options.progress
@@ -385,14 +446,15 @@ public final class SequenceEncoder {
                     nextVideoFrame = i + 1
                     encodedVideo += 1
                     let vp = Double(encodedVideo) / Double(totalVideoFrames) * videoWeight
-                    let ap = audioFrameCount > 0
-                        ? Double(nextAudioFrame) / Double(audioFrameCount) * audioWeight
+                    let audioDone = audioCursors.reduce(0, +)
+                    let ap = totalAudioFrames > 0
+                        ? Double(audioDone) / Double(totalAudioFrames) * audioWeight
                         : 0
                     progressCallback?(vp + ap)
                     if encodedVideo - lastLoggedFrame >= 30 || encodedVideo == totalVideoFrames {
                         let elapsed = Date().timeIntervalSince(startedAt)
                         let fps = elapsed > 0 ? Double(encodedVideo) / elapsed : 0
-                        PreemDebugLog.log("[Encoder] video \(encodedVideo)/\(totalVideoFrames) audio \(nextAudioFrame)/\(audioFrameCount) @ \(String(format: "%.1f", fps)) fps")
+                        PreemDebugLog.log("[Encoder] video \(encodedVideo)/\(totalVideoFrames) audio \(audioDone)/\(totalAudioFrames) @ \(String(format: "%.1f", fps)) fps")
                         lastLoggedFrame = encodedVideo
                     }
                 }
@@ -401,34 +463,37 @@ public final class SequenceEncoder {
             }
         }
 
-        // ── Audio pump ───────────────────────────────────────────────
+        // ── Audio pump(s) — one per output track ─────────────────────
         let audioChunkFrames = 4096
-        if let audioInput, let audioFormatDesc {
+        for (jobIndex, job) in pendingAudio.enumerated() {
+            let input = job.input
+            let fmt = job.formatDesc
+            let mix = job.mix
+            let channels = job.channelCount
+            let frames = mix.first?.count ?? 0
+            let queue = DispatchQueue(label: "preem.encode.audio.\(jobIndex)", qos: .userInitiated)
             group.enter()
-            audioInput.requestMediaDataWhenReady(on: audioQueue) {
-                while audioInput.isReadyForMoreMediaData {
+            input.requestMediaDataWhenReady(on: queue) {
+                while input.isReadyForMoreMediaData {
                     if isCancelledCheck() || errorAlreadySet() {
-                        audioInput.markAsFinished()
-                        group.leave()
-                        return
+                        input.markAsFinished(); group.leave(); return
                     }
-                    if nextAudioFrame >= audioFrameCount {
-                        audioInput.markAsFinished()
-                        group.leave()
-                        return
+                    let cursor = audioCursors[jobIndex]
+                    if cursor >= frames {
+                        input.markAsFinished(); group.leave(); return
                     }
-                    let take = min(audioChunkFrames, audioFrameCount - nextAudioFrame)
+                    let take = min(audioChunkFrames, frames - cursor)
                     let didAppend = autoreleasepool { () -> Bool in
                         do {
                             let sb = try Self.makeAudioSampleBuffer(
-                                nonInterleaved: audioMix,
-                                startFrame: nextAudioFrame,
+                                nonInterleaved: mix,
+                                startFrame: cursor,
                                 frameCount: take,
-                                channelCount: audioChannelCount,
+                                channelCount: channels,
                                 sampleRate: audioSampleRate,
-                                formatDescription: audioFormatDesc
+                                formatDescription: fmt
                             )
-                            if !audioInput.append(sb) {
+                            if !input.append(sb) {
                                 let reason = writer.error?.localizedDescription ?? "unknown"
                                 reportError(EncoderError.appendFailed("audio: \(reason)"))
                                 return false
@@ -440,11 +505,9 @@ public final class SequenceEncoder {
                         }
                     }
                     if !didAppend {
-                        audioInput.markAsFinished()
-                        group.leave()
-                        return
+                        input.markAsFinished(); group.leave(); return
                     }
-                    nextAudioFrame += take
+                    audioCursors[jobIndex] = cursor + take
                 }
             }
         }

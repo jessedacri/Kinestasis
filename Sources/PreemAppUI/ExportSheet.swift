@@ -341,6 +341,20 @@ struct ExportSheet: View {
                     .pickerStyle(.menu)
                     .frame(maxWidth: 220)
                 }
+                // Multi-track layout — MOV container only (audio-only
+                // export is always a single mixed stream).
+                if !settings.isAudioOnly {
+                    row("Tracks") {
+                        Picker("", selection: $settings.audio.layout) {
+                            ForEach(ExportSettings.AudioSettings.Layout.allCases) { l in
+                                Text(l.displayName).tag(l)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 220)
+                    }
+                }
                 row("Channels") {
                     Picker("", selection: $settings.audio.channels) {
                         ForEach(ExportSettings.AudioSettings.Channels.allCases) { c in
@@ -350,6 +364,10 @@ struct ExportSheet: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 220)
+                    .disabled(settings.audio.layout.preservesSourceChannels)
+                    .help(settings.audio.layout.preservesSourceChannels
+                          ? "Each track keeps its source channel count"
+                          : "")
                 }
                 if settings.audio.codec == .aac {
                     row("Bitrate") {

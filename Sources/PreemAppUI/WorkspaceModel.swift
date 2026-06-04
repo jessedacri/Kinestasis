@@ -1703,7 +1703,7 @@ public final class WorkspaceModel: ObservableObject {
 
     /// PCM-float audio output settings for MOV containers. Used by the
     /// pre-render cache + Pro presets that want full-quality audio.
-    static func defaultPCMAudioOutputSettings(sampleRate: Int, channelCount: Int) -> [String: Any] {
+    nonisolated static func defaultPCMAudioOutputSettings(sampleRate: Int, channelCount: Int) -> [String: Any] {
         [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: sampleRate,
@@ -1871,22 +1871,29 @@ public final class WorkspaceModel: ObservableObject {
             )
         }
 
-        // Video + audio in MOV
+        // Video + audio in MOV. The output-settings builder varies only
+        // the channel count, so multi-track export can build one dict per
+        // track (channel count differs per track under preserve-channels).
         fileType = .mov
-        if settings.audio.include {
-            switch settings.audio.codec {
+        let audioCodec = settings.audio.codec
+        let bitrateKbps = settings.audio.bitrateKbps
+        let movAudioSettings: @Sendable (Int) -> [String: Any] = { channels in
+            switch audioCodec {
             case .pcm, .wav, .aiff:
-                audioSettings = defaultPCMAudioOutputSettings(
-                    sampleRate: audioRate, channelCount: audioChannels
-                )
+                return Self.defaultPCMAudioOutputSettings(sampleRate: audioRate, channelCount: channels)
             case .aac:
-                audioSettings = [
+                return [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
                     AVSampleRateKey: audioRate,
-                    AVNumberOfChannelsKey: audioChannels,
-                    AVEncoderBitRateKey: settings.audio.bitrateKbps * 1000,
+                    AVNumberOfChannelsKey: channels,
+                    AVEncoderBitRateKey: bitrateKbps * 1000,
                 ]
             }
+        }
+
+        let multiTrack = settings.audio.include && settings.audio.layout.producesMultipleTracks
+        if settings.audio.include {
+            audioSettings = movAudioSettings(audioChannels)
         } else {
             audioSettings = nil
         }
@@ -1905,6 +1912,9 @@ public final class WorkspaceModel: ObservableObject {
             audioOutputSettings: audioSettings,
             audioChannelCount: audioChannels,
             audioSampleRate: audioRate,
+            audioMultiTrack: multiTrack,
+            audioPreserveSourceChannels: settings.audio.layout.preservesSourceChannels,
+            audioSettingsBuilder: multiTrack ? movAudioSettings : nil,
             fileType: fileType,
             progress: progress
         )

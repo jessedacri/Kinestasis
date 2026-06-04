@@ -7,9 +7,8 @@ Snapshot for the next session. Last updated 2026-06-04. Pairs with `CLAUDE.md` (
 **M1 + M2 complete; most of M3 shipped.** The app imports → cuts/trims/blades → drags (incl. multi-select) → fades → cross-dissolves → animates Transform/Crop with keyframes → **grades color (Lumetri-style)** → renders In→Out → exports ProRes/H.264/HEVC. **Native MXF** (Canon XF-AVC etc.) imports and plays (video + audio). The UI is branded as a **Polymerge sibling** (dark + amber).
 
 **Git topology — IMPORTANT:**
-- **`main`** ends at `929bbe5` ("Color grading + native MXF support") — has everything through color grading + MXF, NO branding. This is the clean pre-branding restore point.
-- **`feature/branding`** (current branch) = `main` + branding (PreemTheme/dark chrome, icon, About, sheets, typography) + two timeline bug-fixes (multi-select drag, ⌘F program fullscreen). The timeline fixes ride this branch even though they're unrelated to branding.
-- **Decision for next session:** merge `feature/branding` → `main` when happy with the brand (or cherry-pick the two timeline fixes `ed9d85c` if branding needs more work first).
+- **`main`** ends at `cb8e117` — branding (`feature/branding`) was fast-forward-merged in on 2026-06-04, so `main` now has color + MXF + branding + the two timeline fixes (multi-select drag, ⌘F program fullscreen).
+- **`feature/multitrack-audio-export`** (current branch) = `main` + multi-track audio export (see its own section below). Merge to `main` when happy.
 
 **This session (2026-05-30 → 06-04) shipped:**
 - **FCP-style bin** — filmstrip browser, skimming, favorites/subclips, fast still-vs-PPE source viewer. → `BROWSER.md`.
@@ -127,11 +126,25 @@ Net: skim shows an instant (thumbnail) frame, sharpens within ~tens of ms, and r
 
 Key files: `BinBrowserView.swift` (rewritten — `FilmstripClipRow`, `FavoriteClipRow`, `Filmstrip`, `WaveformStrip`, filter toggle), `WorkspaceModel.swift` (`loadSourceClip`/`skimSource` ~:1390, `favoriteSourceSelection`/`removeFavorite`/`renameFavorite` ~:1430, `sourceMarksActive` ~:117, `binFilter` ~:97), `PreemAppUI.swift` (I/O routing via `sourceMarksActive`, new `f`/`F` case ~:255), `FocusedViewer.swift` (`BinFilter` enum), `PreemCore/MediaPool.swift` (`FavoriteRange` + `ClipSource.favorites` + custom decode).
 
+## Multi-track audio export — DONE (2026-06-04)
+
+The export sheet's **Audio → Tracks** picker now offers three layouts (MOV container only; audio-only export stays a single mixed stream):
+- **Single (Mixdown)** — default; every timeline audio track summed to one output track (unchanged behavior).
+- **Separate Tracks** — one output audio track per audible timeline track, each downmixed to the chosen Channels (mono/stereo).
+- **Separate Tracks (Source Channels)** — one output track per timeline track, each keeping its source clips' native channel count (the Channels picker is disabled). Discrete preservation: source channel *i* → output channel *i*.
+
+Implementation:
+- `ExportSettings.AudioSettings.Layout` (`mixdown`/`separateTracks`/`separateTracksPreserveChannels`) + `layout` field (default `.mixdown`). `producesMultipleTracks` / `preservesSourceChannels` helpers.
+- `OfflineAudioMixdown.renderPerTrack(preserveSourceChannels:)` returns one `TrackMix` (channels + channelCount + label) per audible track. The per-clip build + paired-cross-fade extension + constant-power envelope logic was factored into a shared `mixTrack(...)`, so `render` (mixdown) and `renderPerTrack` stay in lockstep.
+- `ClipAudioLoader.loadNative(...)` decodes preserving native channels — MXF was already native; non-MXF now goes through `AVAssetReader` with one `AVAssetReaderTrackOutput` per audio `AVAssetTrack`, concatenated channel-wise (so a multicam file with several discrete mono tracks preserves all of them). Separate `nativeCache` LRU so it doesn't collide with the downmixed `cache`.
+- `SequenceEncoder` adds N `AVAssetWriterInput`s (one per track), each its own `CMAudioFormatDescription`, its own pump queue, and its own cursor slot in `audioCursors` (no cross-pump data race). Multi-track mixes are pre-rendered *before* `startWriting()` because the per-track channel counts must be known to add the inputs. New `Options`: `audioMultiTrack`, `audioPreserveSourceChannels`, `audioSettingsBuilder` (builds per-channel-count output settings).
+- Wired in `WorkspaceModel.encoderOptions` (MOV branch); `defaultPCMAudioOutputSettings` made `nonisolated`. UI in `ExportSheet.audioSection`.
+- Tested: `Tests/PreemMediaTests/MultiTrackAudioMixdownTests.swift` (synthetic WAV fixtures — mixdown sum, per-track count, muted-track skip, native-channel preservation). **Not yet verified with real multicam footage in a written .mov** — confirm next session that a multi-track .mov opens with discrete tracks in another NLE / `ffprobe`.
+
 ## Other backlog (recommended order)
 
 1. **Cache↔live boundary micro-hiccup** — see "Known follow-ups" below (a tightening pass on the playback engine).
-2. **Multi-track audio export** — clips with multi-cam camera audio still collapse to one stream on export. Needs: `ClipAudioLoader` rewrite on `AVAssetReader` with one output per source `AVAssetTrack` (current `AVAudioFile` path collapses to one stream); per-track `AVAssetWriterInput` in `SequenceEncoder`; `ExportSettings.audio.tracksMode = .mixdown | .preserveSource`.
-3. **Proxy pipeline** — ProRes 422 LT background transcode on import for heavy source codecs (e.g. the 4K H.264 in the test project). Realtime drop chip already prompts the user; proxies are the next-level fix and pair naturally with the bin/skim work (skimming 4K H.264 is decode-heavy).
+2. **Proxy pipeline** — ProRes 422 LT background transcode on import for heavy source codecs (e.g. the 4K H.264 in the test project). Realtime drop chip already prompts the user; proxies are the next-level fix and pair naturally with the bin/skim work (skimming 4K H.264 is decode-heavy).
 4. **Bezier handles for keyframes** — today `.bezier` / `.easeIn` / `.easeOut` use cubic Hermite with fixed zero tangents at the eased ends. After Effects–style draggable Bezier handles would need: schema additions (`Keyframe.inHandle`, `Keyframe.outHandle`), updated `sampleDouble`, and per-handle drag UI in the strip.
 5. **Rotated chrome in the program viewer overlay.** The bounding box + handles stay axis-aligned today (AABB of the rotated picture). Rotating the chrome to follow the picture requires applying inverse rotation to cursor deltas in the corner/edge gesture math — `ProgramTransformOverlay.cornerScaleGesture` and friends.
 6. **Customizable keymap presets** — `PreemSettings`-backed save/load for the keymap. User flagged this when the V/B/A keymap landed.
@@ -287,8 +300,8 @@ AVFoundation can't open MXF, but PPE has a native demuxer (`MXFFrameSource`, Can
 
 ## State pointer
 
-- **App version**: M2 complete + most of M3 shipped. This session added the FCP bin, Lumetri color grading, native MXF, and Polymerge-sibling branding (see CURRENT STATUS up top). Remaining backlog: **merge `feature/branding`→`main`**; bin follow-ups (proxy-backed skim, persistent skim host, folders/smart collections, reject+keywords); color (linear-light compositing, HDR output, color wheels/HSL secondary, scopes); MXF (Long-GOP keyframe-aware seek; batched packet reads); cache↔live boundary micro-hiccup; multi-track audio export; proxy pipeline; bezier handles; keymap presets; `.preem` package; render-graph fusion.
-- **Git**: `main` = `929bbe5` (through color+MXF, no branding). `feature/branding` (current) = main + branding + 2 timeline fixes; merge when happy. Worktree clean. `themarket.mp4` + `*.mxf` gitignored (large footage). Test footage: `B032C448_260529MX_CANON.MXF` (10GB Canon 4K All-Intra MXF, gitignored) is the MXF test file.
+- **App version**: M2 complete + most of M3 shipped. This session added the FCP bin, Lumetri color grading, native MXF, Polymerge-sibling branding (merged to `main`), and **multi-track audio export** (see CURRENT STATUS up top). Remaining backlog: **merge `feature/multitrack-audio-export`→`main`**; verify multi-track .mov with real multicam footage; bin follow-ups (proxy-backed skim, persistent skim host, folders/smart collections, reject+keywords); color (linear-light compositing, HDR output, color wheels/HSL secondary, scopes); MXF (Long-GOP keyframe-aware seek; batched packet reads); cache↔live boundary micro-hiccup; proxy pipeline; bezier handles; keymap presets; `.preem` package; render-graph fusion.
+- **Git**: `main` = `cb8e117` (color + MXF + branding + timeline fixes — branding merged 2026-06-04). `feature/multitrack-audio-export` (current) = main + multi-track audio export; merge when happy. `themarket.mp4` + `*.mxf` gitignored (large footage). Test footage: `B032C448_260529MX_CANON.MXF` (10GB Canon 4K All-Intra MXF, gitignored) is the MXF test file.
 - **Polymerge**: forked in-tree on 2026-05-27 (no external dep). Brand mirrors `/Users/jessedacri/polymerge/PolyMerge/Views/Components/Theme.swift`.
 - **Debug log**: `/tmp/preem-debug.log`. `PreemDebugLog.log(...)` wired into critical paths. Check it first when something behaves weird.
 - **Build**: `swift build -c release && swift run -c release Preem` for real footage. 41 unit tests (`swift test`), all passing.

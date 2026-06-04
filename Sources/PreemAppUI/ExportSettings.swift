@@ -185,19 +185,52 @@ public struct ExportSettings: Equatable {
         public var sampleRate: SampleRate
         public var bitrateKbps: Int    // for AAC
         public var channels: Channels
+        public var layout: Layout
 
         public init(
             include: Bool = true,
             codec: AudioCodec = .aac,
             sampleRate: SampleRate = .matchSequence,
             bitrateKbps: Int = 256,
-            channels: Channels = .stereo
+            channels: Channels = .stereo,
+            layout: Layout = .mixdown
         ) {
             self.include = include
             self.codec = codec
             self.sampleRate = sampleRate
             self.bitrateKbps = bitrateKbps
             self.channels = channels
+            self.layout = layout
+        }
+
+        /// How the sequence's audio tracks map onto the output file's
+        /// audio tracks. `.mixdown` (default) sums every timeline track to
+        /// one output track; the `separate` modes write one output track
+        /// per timeline audio track (MOV container only — see
+        /// `producesMultipleTracks`).
+        public enum Layout: String, CaseIterable, Identifiable, Equatable {
+            /// All timeline tracks summed → one output track at `channels`.
+            case mixdown
+            /// One output track per timeline track, each downmixed to `channels`.
+            case separateTracks
+            /// One output track per timeline track, each keeping its
+            /// source clips' native channel count.
+            case separateTracksPreserveChannels
+
+            public var id: String { rawValue }
+            public var displayName: String {
+                switch self {
+                case .mixdown:                       return "Single (Mixdown)"
+                case .separateTracks:                return "Separate Tracks"
+                case .separateTracksPreserveChannels: return "Separate Tracks (Source Channels)"
+                }
+            }
+            /// True when this layout emits more than one audio track —
+            /// only valid in a MOV container.
+            public var producesMultipleTracks: Bool { self != .mixdown }
+            /// True when each output track keeps its source's native
+            /// channel layout (the `channels` mono/stereo choice is moot).
+            public var preservesSourceChannels: Bool { self == .separateTracksPreserveChannels }
         }
 
         public enum AudioCodec: String, CaseIterable, Identifiable, Equatable {

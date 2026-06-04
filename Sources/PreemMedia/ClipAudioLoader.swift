@@ -38,6 +38,14 @@ public actor ClipAudioLoader {
     private var cacheOrder: [ClipID] = []
     private var cacheBytes: Int = 0
 
+    /// Separate cache for native-channel decodes (`loadNative`). Kept apart
+    /// from `cache` because the same `ClipID` can be decoded both
+    /// downmixed (`load`) and at native channel count (`loadNative`), and
+    /// the two results must not collide.
+    private var nativeCache: [ClipID: DecodedAudio] = [:]
+    private var nativeOrder: [ClipID] = []
+    private var nativeBytes: Int = 0
+
     /// Cached native MXF readers (one index/file-handle per URL) so the
     /// expensive packet-index scan is paid once, then ranged decodes are
     /// cheap. Keyed by file path.
@@ -92,6 +100,26 @@ public actor ClipAudioLoader {
         return Self.slice(decoded.channels, start: startFrame, count: frameCount)
     }
 
+    /// Decode preserving the source's native channel layout (no downmix),
+    /// resampled only if the native rate differs from `targetSampleRate`.
+    /// Used by `separateTracksPreserveChannels` export. Files with several
+    /// discrete audio tracks (e.g. multicam camera audio) are concatenated
+    /// channel-wise into one N-channel result. MXF is already native via
+    /// `decodeMXF`, so it routes through the normal cache.
+    public func loadNative(clipID: ClipID, url: URL) async throws -> DecodedAudio {
+        if url.pathExtension.lowercased() == "mxf" {
+            // MXF decode preserves native channels already.
+            return try await load(clipID: clipID, url: url)
+        }
+        if let cached = nativeCache[clipID] {
+            touchNative(clipID)
+            return cached
+        }
+        let decoded = try await decodeNative(url: url)
+        insertNative(clipID: clipID, decoded: decoded)
+        return decoded
+    }
+
     private func mxfReader(for url: URL) async throws -> MXFAudioReader {
         let key = url.path
         if let r = mxfReaders[key] { return r }
@@ -119,6 +147,9 @@ public actor ClipAudioLoader {
         cache.removeAll()
         cacheOrder.removeAll()
         cacheBytes = 0
+        nativeCache.removeAll()
+        nativeOrder.removeAll()
+        nativeBytes = 0
         mxfReaders.removeAll()
         rangeCache.removeAll()
         rangeOrder.removeAll()
@@ -257,6 +288,129 @@ public actor ClipAudioLoader {
             sampleRate: srcRate > 0 && abs(srcRate - targetSampleRate) > 0.5 ? targetSampleRate : srcRate,
             originalChannelCount: channels.count
         )
+    }
+
+    /// Native-channel decode via `AVAssetReader`, one track output per
+    /// audio `AVAssetTrack`, resampled to `targetSampleRate`. Tracks are
+    /// concatenated channel-wise (track 0's channels first, then track 1,
+    /// …) and zero-padded to a common length. Runs off the actor.
+    private func decodeNative(url: URL) async throws -> DecodedAudio {
+        let rate = targetSampleRate
+        return try await Task.detached(priority: .userInitiated) {
+            try Self.readNative(url: url, targetSampleRate: rate)
+        }.value
+    }
+
+    private nonisolated static func readNative(url: URL, targetSampleRate: Double) throws -> DecodedAudio {
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        let audioTracks = asset.tracks(withMediaType: .audio)
+        guard !audioTracks.isEmpty else { throw LoadError.noAudioTrack }
+
+        let reader: AVAssetReader
+        do {
+            reader = try AVAssetReader(asset: asset)
+        } catch {
+            throw LoadError.readerFailed("AVAssetReader init: \(error.localizedDescription)")
+        }
+
+        // Native channel count per track (no AVNumberOfChannelsKey → keep
+        // source channels); resample to the engine rate; interleaved float.
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+            AVSampleRateKey: targetSampleRate,
+        ]
+
+        var outputs: [AVAssetReaderTrackOutput] = []
+        for track in audioTracks {
+            let out = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+            out.alwaysCopiesSampleData = false
+            if reader.canAdd(out) { reader.add(out); outputs.append(out) }
+        }
+        guard !outputs.isEmpty, reader.startReading() else {
+            throw LoadError.readerFailed("AVAssetReader could not start (\(reader.error?.localizedDescription ?? "unknown"))")
+        }
+
+        // Drain each track output into per-track deinterleaved channels.
+        var perTrack: [[[Float]]] = []
+        perTrack.reserveCapacity(outputs.count)
+        for out in outputs {
+            perTrack.append(Self.drainTrack(out))
+        }
+
+        if reader.status == .failed {
+            throw LoadError.readerFailed("AVAssetReader failed: \(reader.error?.localizedDescription ?? "unknown")")
+        }
+
+        // Concatenate tracks channel-wise, padding to the longest.
+        let maxFrames = perTrack.flatMap { $0 }.map(\.count).max() ?? 0
+        var channels: [[Float]] = []
+        for trackChannels in perTrack {
+            for var ch in trackChannels {
+                if ch.count < maxFrames { ch.append(contentsOf: repeatElement(0, count: maxFrames - ch.count)) }
+                channels.append(ch)
+            }
+        }
+        if channels.isEmpty { channels = [[]] }
+        return DecodedAudio(channels: channels, sampleRate: targetSampleRate, originalChannelCount: channels.count)
+    }
+
+    /// Read every sample buffer from one track output and return its
+    /// deinterleaved float channels. Channel count is read from the
+    /// delivered format description (native, since we didn't force it).
+    private nonisolated static func drainTrack(_ output: AVAssetReaderTrackOutput) -> [[Float]] {
+        var channels: [[Float]] = []
+        var channelCount = 0
+        while let sb = output.copyNextSampleBuffer() {
+            defer { /* sb released by ARC */ }
+            if channelCount == 0,
+               let fmt = CMSampleBufferGetFormatDescription(sb),
+               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) {
+                channelCount = Int(asbd.pointee.mChannelsPerFrame)
+                channels = Array(repeating: [Float](), count: max(1, channelCount))
+            }
+            guard channelCount > 0, let block = CMSampleBufferGetDataBuffer(sb) else { continue }
+            var lengthAtOffset = 0
+            var totalLength = 0
+            var dataPtr: UnsafeMutablePointer<Int8>?
+            guard CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset,
+                                              totalLengthOut: &totalLength, dataPointerOut: &dataPtr) == kCMBlockBufferNoErr,
+                  let base = dataPtr else { continue }
+            let floatCount = totalLength / MemoryLayout<Float>.size
+            let frames = floatCount / channelCount
+            base.withMemoryRebound(to: Float.self, capacity: floatCount) { fp in
+                for ch in 0..<channelCount {
+                    channels[ch].reserveCapacity(channels[ch].count + frames)
+                    for f in 0..<frames {
+                        channels[ch].append(fp[f * channelCount + ch])
+                    }
+                }
+            }
+        }
+        return channels.isEmpty ? [[]] : channels
+    }
+
+    private func insertNative(clipID: ClipID, decoded: DecodedAudio) {
+        let bytes = decoded.channels.reduce(0) { $0 + $1.count * MemoryLayout<Float>.stride }
+        while nativeBytes + bytes > maxCacheBytes, let oldest = nativeOrder.first {
+            nativeOrder.removeFirst()
+            if let dropped = nativeCache.removeValue(forKey: oldest) {
+                nativeBytes -= dropped.channels.reduce(0) { $0 + $1.count * MemoryLayout<Float>.stride }
+            }
+        }
+        nativeCache[clipID] = decoded
+        nativeOrder.append(clipID)
+        nativeBytes += bytes
+    }
+
+    private func touchNative(_ clipID: ClipID) {
+        if let idx = nativeOrder.firstIndex(of: clipID) {
+            nativeOrder.remove(at: idx)
+            nativeOrder.append(clipID)
+        }
     }
 
     private func insertRange(key: String, channels: [[Float]]) {
