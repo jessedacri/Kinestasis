@@ -80,6 +80,8 @@ public final class WorkspaceModel: ObservableObject {
     /// over PPE until this flips, so play-after-skim doesn't flash black.
     @Published public var sourcePlaybackReady: Bool = false
     @Published public var focusedViewer: FocusedViewer = .program
+    /// ⌘F — show ONLY the Program viewer filling the window (cinema mode).
+    @Published public var programFullscreen: Bool = false
     /// 0…1 progress of an in-flight pre-render. nil = no render running.
     /// Driven by `renderInToOut`; consumed by the program viewer header
     /// (or wherever surfaces it).
@@ -2301,6 +2303,36 @@ public final class WorkspaceModel: ObservableObject {
             // Then, if requested, change ONLY the dragged clip's track.
             if let target = targetTrack {
                 moveSingleClipToTrack(id, target: target, in: &sequence)
+            }
+        }
+    }
+
+    /// Move several clips to explicit new starts at once (horizontal
+    /// multi-selection drag). Each clip keeps its track. Starts are already
+    /// clamped/spaced by the caller; we just set + re-sort.
+    public func moveSelectedClipsTo(_ targets: [(PlacedClipID, RationalTime)]) {
+        guard !targets.isEmpty else { return }
+        let map = Dictionary(targets, uniquingKeysWith: { a, _ in a })
+        updateSequence { sequence in
+            for vIdx in sequence.videoTracks.indices {
+                for cIdx in sequence.videoTracks[vIdx].clips.indices {
+                    let cid = sequence.videoTracks[vIdx].clips[cIdx].id
+                    if let t = map[cid] {
+                        sequence.videoTracks[vIdx].clips[cIdx].timelineRange = TimeRange(
+                            start: t, duration: sequence.videoTracks[vIdx].clips[cIdx].timelineRange.duration)
+                    }
+                }
+                sequence.videoTracks[vIdx].clips.sort { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
+            }
+            for aIdx in sequence.audioTracks.indices {
+                for cIdx in sequence.audioTracks[aIdx].clips.indices {
+                    let cid = sequence.audioTracks[aIdx].clips[cIdx].id
+                    if let t = map[cid] {
+                        sequence.audioTracks[aIdx].clips[cIdx].timelineRange = TimeRange(
+                            start: t, duration: sequence.audioTracks[aIdx].clips[cIdx].timelineRange.duration)
+                    }
+                }
+                sequence.audioTracks[aIdx].clips.sort { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
             }
         }
     }

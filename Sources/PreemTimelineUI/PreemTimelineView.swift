@@ -39,6 +39,9 @@ public final class PreemTimelineView: NSView {
         /// index = no change. Workspace ignores cross-kind moves
         /// (audio clip dragged into a video row, etc.).
         public var moveClip: ((PlacedClipID, RationalTime, MoveTargetTrack?) -> Void)?
+        /// Move several clips at once to explicit new starts (horizontal
+        /// multi-selection drag). Each clip keeps its track.
+        public var moveSelectedClips: (([(PlacedClipID, RationalTime)]) -> Void)?
         public var trimLeft: ((PlacedClipID, RationalTime) -> Void)?
         public var trimRight: ((PlacedClipID, RationalTime) -> Void)?
         /// Resolve a `ClipID` to a `ClipSource` so we can render the
@@ -325,6 +328,16 @@ public final class PreemTimelineView: NSView {
         var originalTrack: MoveTargetTrack     // for change detection on release
     }
     private var floatingDraggedClip: FloatingDraggedClip?
+
+    // Multi-selection drag: original start (seconds) of every clip moving
+    // together, captured at mouse-down. `>1` entry → horizontal multi-move.
+    private var multiDragOriginals: [PlacedClipID: Double] = [:]
+    /// Set when the mouse went down on an already-selected clip with no
+    /// modifier. If the gesture turns out to be a plain click (no drag), we
+    /// collapse the selection to just this clip on mouse-up (Finder/NLE
+    /// behavior); if it's a drag, the whole selection moves.
+    private var clickToCollapseID: PlacedClipID?
+    private var dragDidMove = false
 
     private struct LaidOutClip {
         var rect: CGRect
@@ -2059,7 +2072,26 @@ public final class PreemTimelineView: NSView {
             switch hit {
             case .body(let id, let grab, let originalStart):
                 let additive = event.modifierFlags.contains(.shift)
-                callbacks.selectClip?(id, additive)
+                let alreadySelected = selectedClipIDs.contains(id)
+                // Don't collapse a multi-selection when you mouse-down on
+                // one of its members — preserve it so the drag can move all
+                // selected clips. A plain click (no drag) collapses to this
+                // clip on mouse-up.
+                if additive {
+                    callbacks.selectClip?(id, true)
+                    clickToCollapseID = nil
+                } else if alreadySelected {
+                    clickToCollapseID = id
+                } else {
+                    callbacks.selectClip?(id, false)
+                    clickToCollapseID = nil
+                }
+                // Capture the original starts of every clip that will move
+                // together. For a fresh single selection it's just this clip.
+                let dragIDs: Set<PlacedClipID> = (additive || alreadySelected)
+                    ? selectedClipIDs.union([id]) : [id]
+                multiDragOriginals = captureClipStarts(for: dragIDs)
+                dragDidMove = false
                 let origTrack = currentTrackOf(id)
                 interaction = .draggingClip(
                     id: id,
@@ -2110,6 +2142,27 @@ public final class PreemTimelineView: NSView {
         case .draggingClip(let id, let grab, let origStart, let origTrack, _):
             let raw = max(0, timeForX(p.x) - grab)
             let snapped = snapTime(raw, excluding: id)
+            dragDidMove = true
+
+            // Multi-selection drag → shift every captured clip horizontally
+            // by the grabbed clip's delta (each keeps its track). Single drag
+            // falls through to the vertical/phantom-track behavior below.
+            if multiDragOriginals.count > 1 {
+                let grabbedOrig = multiDragOriginals[id] ?? origStart
+                // Clamp the delta collectively so the earliest clip can't go
+                // below 0 — preserves the spacing between all moved clips.
+                let minOrig = multiDragOriginals.values.min() ?? 0
+                var delta = snapped - grabbedOrig
+                if delta < 0 { delta = max(delta, -minOrig) }
+                let targets: [(PlacedClipID, RationalTime)] = multiDragOriginals.map { cid, orig in
+                    let t = max(0, orig + delta)
+                    return (cid, RationalTime(value: Int64((t * 1000).rounded()), scale: 1000))
+                }
+                callbacks.moveSelectedClips?(targets)
+                needsDisplay = true
+                return
+            }
+
             // Horizontal move is live (model mutates each tick).
             callbacks.moveClip?(id, RationalTime(value: Int64(snapped * 1000), scale: 1000), nil)
             // Vertical move is preview only — we render the dragged
@@ -2192,18 +2245,22 @@ public final class PreemTimelineView: NSView {
     public override func mouseUp(with event: NSEvent) {
         switch interaction {
         case .draggingClip(let id, let grab, _, let origTrack, let currentTrack):
-            // If the cursor ended over a different track than the
-            // dragged clip's origin, commit the track change now.
-            // Must subtract the grab offset (same math as mouseDragged)
-            // or the clip jumps forward by the cursor-to-clip-start
-            // distance on release.
-            if let target = currentTrack, target != origTrack {
+            if !dragDidMove, let collapse = clickToCollapseID {
+                // Plain click on an already-selected clip (no drag) →
+                // collapse the multi-selection to just this clip (Finder/NLE).
+                callbacks.selectClip?(collapse, false)
+            } else if multiDragOriginals.count <= 1, let target = currentTrack, target != origTrack {
+                // Single-clip cross-track move committed on release. (Multi
+                // drag is horizontal-only and already applied live.)
                 let p = convert(event.locationInWindow, from: nil)
                 let raw = max(0, timeForX(p.x) - grab)
                 let snapped = snapTime(raw, excluding: id)
                 callbacks.moveClip?(id, RationalTime(value: Int64(snapped * 1000), scale: 1000), target)
             }
             callbacks.endClipDragOrTrim?(id)
+            multiDragOriginals = [:]
+            clickToCollapseID = nil
+            dragDidMove = false
         case .trimmingLeft(let id, _):
             callbacks.endClipDragOrTrim?(id)
         case .trimmingRight(let id, _):
@@ -2524,6 +2581,19 @@ public final class PreemTimelineView: NSView {
     }
 
     /// Find which track in the active sequence holds the given clip.
+    /// Start times (seconds) of the given clips, captured for a multi-drag.
+    private func captureClipStarts(for ids: Set<PlacedClipID>) -> [PlacedClipID: Double] {
+        guard let sequence else { return [:] }
+        var out: [PlacedClipID: Double] = [:]
+        for track in sequence.videoTracks {
+            for c in track.clips where ids.contains(c.id) { out[c.id] = c.timelineRange.start.seconds }
+        }
+        for track in sequence.audioTracks {
+            for c in track.clips where ids.contains(c.id) { out[c.id] = c.timelineRange.start.seconds }
+        }
+        return out
+    }
+
     private func currentTrackOf(_ id: PlacedClipID) -> MoveTargetTrack? {
         guard let sequence else { return nil }
         for (vIdx, track) in sequence.videoTracks.enumerated() {

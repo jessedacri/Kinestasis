@@ -43,7 +43,7 @@ public struct PreemRootView: View {
             .background(PreemTheme.bg)
     }
 
-    private var content: some View {
+    private var splitLayout: some View {
         PreemSplitView(
             isVertical: true,                                    // vertical divider → horizontal stack
             autosaveName: "preem.root.binVsMain",
@@ -85,6 +85,16 @@ public struct PreemRootView: View {
                 )
             }
         )
+    }
+
+    private var content: some View {
+        Group {
+            if workspace.programFullscreen {
+                ProgramViewer(workspace: workspace)
+            } else {
+                splitLayout
+            }
+        }
         .frame(minWidth: 1200, minHeight: 800)
         .onReceive(NotificationCenter.default.publisher(for: .preemExportFCPXML)) { _ in
             exportFCPXML()
@@ -155,6 +165,16 @@ public struct PreemRootView: View {
         .onDisappear { removeKeyMonitor() }
     }
 
+    /// Toggle the Program-fills-window mode and keep the native window
+    /// fullscreen in sync so the picture truly fills the screen.
+    private func setProgramFullscreen(_ on: Bool) {
+        workspace.programFullscreen = on
+        workspace.focusedViewer = .program
+        let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.contentView != nil })
+        let isFS = win?.styleMask.contains(.fullScreen) ?? false
+        if on != isFS { win?.toggleFullScreen(nil) }
+    }
+
     private func installKeyMonitor() {
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             // Skip if user is typing in a text field
@@ -190,12 +210,21 @@ public struct PreemRootView: View {
                 case "z":
                     if isShift { workspace.redo() } else { workspace.undo() }
                     return nil
+                case "f":
+                    setProgramFullscreen(!workspace.programFullscreen)
+                    return nil
                 default:
                     return event
                 }
             }
 
             switch chars {
+            case "\u{1B}":   // Escape exits Program fullscreen
+                if workspace.programFullscreen {
+                    setProgramFullscreen(false)
+                    return nil
+                }
+                return event
             case " ":
                 workspace.toggleFocusedPlay()
                 return nil
@@ -466,6 +495,11 @@ private struct TimelineHostView: NSViewRepresentable {
             // main thread.
             MainActor.assumeIsolated {
                 workspace?.moveClip(id, to: time, targetTrack: trackTarget)
+            }
+        }
+        view.callbacks.moveSelectedClips = { [weak workspace] targets in
+            MainActor.assumeIsolated {
+                workspace?.moveSelectedClipsTo(targets)
             }
         }
         view.callbacks.trimLeft = { [weak workspace] id, time in
