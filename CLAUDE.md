@@ -55,20 +55,20 @@ Dependency rule: modules depend **upward only**. PreemCore depends on nothing. P
 
 See `docs/APPLE-SILICON.md` for the deep dive.
 
-## Polymerge — forked in-tree (2026-05-27)
+## Polymerge — shared via PolymergeKit (fork retired 2026-07-12)
 
-Polymerge's four Preem-relevant modules were forked into Preem's source tree on 2026-05-27 from Polymerge's `feature/spm-library-targets` working tree. The fork severed the cross-product dependency so PPE, audio, and ingest can be modified freely for NLE-specific needs (pull-mode rendering, offline composition for pre-render + export) without touching the Polymerge product.
+Polymerge's four Preem-relevant modules were originally forked into Preem's source tree on 2026-05-27. On 2026-07-12 the fork was retired: Preem's post-fork improvements (async MXF decode pipeline, cached KLV index, `MXFAudioReader`, renderer first-frame callback) were backported upstream, and the modules were extracted to the sibling package **PolymergeKit** (`/Users/jessedacri/PolymergeKit`, its own git repo) that BOTH Preem and Polymerge consume via a local-path SPM dependency (`.package(path: "../PolymergeKit")`). There is exactly one copy of these modules now; improvements land in the Kit once and reach both apps.
 
-Forked modules now living under `Sources/`:
+Kit modules consumed by Preem:
 
 - `PolymergeMediaModel` — `AudioFile`, `VideoFile`, `TimecodeValue`, DSP primitives (`HighPassFilter`, `PhaseTrajectory`, `LTCDecoder`, etc.)
 - `PolymergeIngest` — WAV/BEXT/iXML parsers, MXF essence/picture/sound/timecode readers
 - `PolymergeAudio` — `AudioPlaybackEngine`, `TrackBuffer`, `TrackBufferBuilder`, `LoudnessAnalyzer`, `MixLoudnessMeasurer`, `SampleRateConverter`, `SincInterpolator`, `TimecodeAligner`, `WaveformTCInferrer`, `VideoAudioExtractor`, `GCCPHATAnalyzer`
 - `PolymergePlayback` — PPE (`CustomVideoPlayer`, `PPEMetalRenderer`, `PPEFrameQueue`, `PPEBackgroundDecoder`, `AVAssetFrameSource`, `MXFFrameSource`, `PPELUTLoader`, `VideoFrameSource`) + legacy video players + `VideoFileParser`
 
-`PolymergePhaseAlign` (phase alignment / STFT) is not used by Preem and was not forked.
+`PolymergePhaseAlign` (phase alignment / STFT) also lives in the Kit but Preem does not depend on that product.
 
-Module names kept the `Polymerge` prefix to minimize import churn — Preem source files still `import PolymergePlayback`, etc. Dependency direction is strictly downward: Polymerge* modules have no Preem deps; Preem* modules consume Polymerge* freely. Upstream Polymerge improvements no longer flow in automatically — that's the cost of severing the coupling, and it's a deliberate trade for autonomy on the playback path.
+Module names keep the `Polymerge` prefix — Preem source files still `import PolymergePlayback`, etc. Dependency direction is strictly downward: Kit modules have no app deps; Preem* modules consume Kit products freely. Library changes are committed in the Kit repo; after changing the Kit, build Preem AND run `swift test` in `../polymerge` (the shared test suite lives there) so a change never breaks the other consumer silently. NLE-specific needs go in the Kit as additive public API, or in a Preem module on top.
 
 ## Conventions
 

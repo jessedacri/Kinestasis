@@ -7,13 +7,13 @@ import PackageDescription
 // shell at the bottom. Each module depends only on modules above it; no
 // cycles. Keep it that way — it's how we'll stay sane at M3+.
 //
-//   Polymerge{MediaModel,Ingest,Audio,Playback}
-//                       forked in-tree on 2026-05-27 from Polymerge's
-//                       feature/spm-library-targets working tree. The
-//                       fork severed the cross-product coupling so PPE,
-//                       audio, and ingest can be modified freely for
-//                       NLE-specific needs (pull-mode rendering, etc.)
-//                       without touching the Polymerge product.
+//   PolymergeKit        shared media-engine libraries (MediaModel, Ingest,
+//                       Audio, Playback), consumed via local-path dep from
+//                       ../PolymergeKit. Replaces the 2026-05-27 in-tree
+//                       fork: Preem's post-fork improvements were merged
+//                       upstream on 2026-07-12 and both apps now consume
+//                       the same package. Library changes go in the Kit
+//                       repo; verify with Polymerge's `swift test` too.
 //   PreemCore           pure data: Project, Sequence, Track, Clip, time
 //   PreemMedia          decode/encode + VT session pool + proxy manager
 //   PreemRender         Metal compositor + render graph
@@ -29,25 +29,10 @@ let package = Package(
     products: [
         .executable(name: "Preem", targets: ["PreemApp"]),
     ],
+    dependencies: [
+        .package(path: "../PolymergeKit"),
+    ],
     targets: [
-        // ── Forked from Polymerge (see top-of-file note) ─────────────
-        .target(name: "PolymergeMediaModel"),
-
-        .target(
-            name: "PolymergeIngest",
-            dependencies: ["PolymergeMediaModel"]
-        ),
-
-        .target(
-            name: "PolymergeAudio",
-            dependencies: ["PolymergeMediaModel", "PolymergeIngest"]
-        ),
-
-        .target(
-            name: "PolymergePlayback",
-            dependencies: ["PolymergeMediaModel", "PolymergeIngest"]
-        ),
-
         // ── Preem ────────────────────────────────────────────────────
         .target(name: "PreemCore"),
 
@@ -55,16 +40,20 @@ let package = Package(
             name: "PreemMedia",
             dependencies: [
                 "PreemCore",
-                "PolymergeMediaModel",
-                "PolymergeIngest",
-                "PolymergeAudio",
-                "PolymergePlayback",
+                .product(name: "PolymergeMediaModel", package: "PolymergeKit"),
+                .product(name: "PolymergeIngest", package: "PolymergeKit"),
+                .product(name: "PolymergeAudio", package: "PolymergeKit"),
+                .product(name: "PolymergePlayback", package: "PolymergeKit"),
             ]
         ),
 
         .target(
             name: "PreemRender",
-            dependencies: ["PreemCore", "PreemMedia", "PolymergePlayback"],
+            dependencies: [
+                "PreemCore",
+                "PreemMedia",
+                .product(name: "PolymergePlayback", package: "PolymergeKit"),
+            ],
             resources: [.process("Resources")]
         ),
 
@@ -92,9 +81,9 @@ let package = Package(
                 "PreemEffects",
                 "PreemML",
                 "PreemTimelineUI",
-                "PolymergeMediaModel",
-                "PolymergeAudio",
-                "PolymergePlayback",
+                .product(name: "PolymergeMediaModel", package: "PolymergeKit"),
+                .product(name: "PolymergeAudio", package: "PolymergeKit"),
+                .product(name: "PolymergePlayback", package: "PolymergeKit"),
             ]
         ),
 
