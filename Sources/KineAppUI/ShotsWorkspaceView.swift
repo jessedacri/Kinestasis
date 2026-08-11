@@ -51,52 +51,45 @@ struct ShotsWorkspaceView: View {
 
             Divider().frame(height: 16)
 
-            barMenu(title: "Rate", value: workspace.project.settings.defaultFrameRate.rawValue + " fps") {
+            BarValueControl(label: "Rate", value: workspace.project.settings.defaultFrameRate.rawValue + " fps") {
                 ForEach(FrameRate.allCases, id: \.self) { rate in
-                    Button {
+                    BarOptionRow(label: rate.rawValue + " fps",
+                                 selected: workspace.project.settings.defaultFrameRate == rate) {
                         workspace.setProjectFrameRate(rate)
-                    } label: {
-                        if workspace.project.settings.defaultFrameRate == rate {
-                            Label(rate.rawValue + " fps", systemImage: "checkmark")
-                        } else {
-                            Text(rate.rawValue + " fps")
-                        }
                     }
                 }
             }
 
-            barMenu(title: "Timing", value: timingModeLabel(workspace.project.settings.burst.timing)) {
-                TimingModePicker(current: workspace.project.settings.burst.timing, allowDefault: false) { mode in
-                    if let mode { workspace.setDefaultShotTiming(mode) }
+            BarValueControl(label: "Timing", value: timingModeLabel(workspace.project.settings.burst.timing)) {
+                TimingOptionRows(current: workspace.project.settings.burst.timing) { mode in
+                    workspace.setDefaultShotTiming(mode)
                 }
             }
 
-            barMenu(title: "Split gap", value: gapLabel(workspace.project.settings.burst.gapThreshold)) {
+            BarValueControl(label: "Split gap", value: gapLabel(workspace.project.settings.burst.gapThreshold)) {
                 ForEach([0.5, 1.0, 2.0, 3.0, 5.0, 10.0], id: \.self) { gap in
-                    Button {
+                    BarOptionRow(label: gapLabel(gap),
+                                 selected: workspace.project.settings.burst.gapThreshold == gap) {
                         workspace.setBurstGapThreshold(gap)
-                    } label: {
-                        if workspace.project.settings.burst.gapThreshold == gap {
-                            Label(gapLabel(gap), systemImage: "checkmark")
-                        } else {
-                            Text(gapLabel(gap))
-                        }
                     }
                 }
+                Text("New shots split where the capture gap is longer than this.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
             }
 
-            barMenu(title: "Min burst", value: "\(workspace.project.settings.burst.minBurstCount)+") {
+            BarValueControl(label: "Min burst", value: "\(workspace.project.settings.burst.minBurstCount)+ stills") {
                 ForEach([2, 3, 4, 5, 8], id: \.self) { n in
-                    Button {
+                    BarOptionRow(label: "\(n)+ stills",
+                                 selected: workspace.project.settings.burst.minBurstCount == n) {
                         workspace.setMinBurstCount(n)
-                    } label: {
-                        if workspace.project.settings.burst.minBurstCount == n {
-                            Label("\(n)+ stills", systemImage: "checkmark")
-                        } else {
-                            Text("\(n)+ stills")
-                        }
                     }
                 }
+                Text("Smaller groups move to Singles. Applies to what is already imported.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
             }
 
             Spacer()
@@ -130,23 +123,13 @@ struct ShotsWorkspaceView: View {
                 .buttonStyle(.plain)
                 .help("Stop rendering")
             } else if !workspace.orderedShots.isEmpty {
-                Button {
-                    workspace.assembleShots()
-                } label: {
-                    Label("Assemble…", systemImage: "timeline.selection")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .help("Render the included shots to ProRes intermediates, then lay them on a timeline for trimming — asks before starting")
-
                 let included = workspace.exportableShots.count
-                Menu {
-                    Button("ProRes 422 HQ + XML…") { workspace.exportShots(codec: .proRes422HQ) }
-                    Button("ProRes 4444 + XML…") { workspace.exportShots(codec: .proRes4444) }
+                Button {
+                    workspace.beginShotExport(nil)
                 } label: {
                     Label("Export \(included) of \(workspace.orderedShots.count)", systemImage: "square.and.arrow.up")
                         .font(.system(size: 11, weight: .semibold))
                 }
-                .fixedSize()
                 .disabled(included == 0)
             }
         }
@@ -155,19 +138,7 @@ struct ShotsWorkspaceView: View {
         .background(KineTheme.bgPanel)
     }
 
-    @ViewBuilder
-    private func barMenu<Items: View>(title: String, value: String, @ViewBuilder items: () -> Items) -> some View {
-        Menu {
-            items()
-        } label: {
-            HStack(spacing: 4) {
-                Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
-                Text(value).font(.system(size: 11, weight: .medium))
-            }
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-    }
+
 
     private func gapLabel(_ gap: Double) -> String {
         String(format: gap < 1 ? "%.1f s" : "%.0f s", gap)
@@ -257,14 +228,8 @@ struct ShotsWorkspaceView: View {
             Image(systemName: "camera.on.rectangle")
                 .font(.system(size: 44))
                 .foregroundStyle(dropTargeted ? KineTheme.accent : Color.secondary.opacity(0.5))
-            Text("Drop a burst folder")
+            Text("Drag files/folders here to begin analysis")
                 .font(.system(size: 18, weight: .semibold))
-            VStack(spacing: 4) {
-                Text("JPEG + RAW stills are grouped into shots by capture gaps.")
-                Text("Set cadence per shot, grade, then batch-export ProRes + XML.")
-            }
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
             Button("Choose Folder…") { importFolder() }
                 .padding(.top, 6)
         }
@@ -341,7 +306,7 @@ private struct SinglesSection: View {
         let singles = workspace.project.mediaPool.singles
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("SINGLES — NOT A BURST")
+                Text("SINGLES · NOT A BURST")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Text("\(singles.count) stills")
@@ -492,10 +457,7 @@ private struct ShotCard: View {
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
             Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
                 .disabled(workspace.copiedShotGrade == nil)
-            Menu("Export Shot") {
-                Button("ProRes 422 HQ…") { workspace.exportShots([shot.id], codec: .proRes422HQ) }
-                Button("ProRes 4444…") { workspace.exportShots([shot.id], codec: .proRes4444) }
-            }
+            Button("Export Shot…") { workspace.beginShotExport([shot.id]) }
             Divider()
             Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
         }
@@ -552,7 +514,7 @@ private struct ShotCard: View {
                         .shadow(color: .black.opacity(0.6), radius: 2)
                 }
                 .buttonStyle(.plain)
-                .help(shot.includeInExport ? "Included in export — click to exclude" : "Excluded from export — click to include")
+                .help(shot.includeInExport ? "Included in export. Click to exclude" : "Excluded from export. Click to include")
                 .padding(6)
             }
             Spacer()
@@ -594,5 +556,131 @@ private struct ShotCard: View {
     private var statsLine: String {
         let seconds = Double(ShotTimingEngine.totalFrames(schedule)) / rate.fps
         return String(format: "%.1fs · %@ · %@", seconds, timingModeLabel(mode), shot.fileTypeLabel)
+    }
+}
+
+// MARK: - Project-bar value controls
+
+/// Always-visible setting readout: small caps label over the current value
+/// in the accent color. Clicking opens an on-brand popover with the
+/// options and any secondary explanation.
+struct BarValueControl<Content: View>: View {
+    let label: String
+    let value: String
+    @ViewBuilder let options: () -> Content
+
+    @State private var showing = false
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            showing.toggle()
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label.uppercased())
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(value)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(KineTheme.accent)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(hovering || showing ? Color.white.opacity(0.06) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                options()
+            }
+            .padding(10)
+            .frame(minWidth: 170)
+            .background(KineTheme.bgPanel)
+            .preferredColorScheme(.dark)
+            .tint(KineTheme.accent)
+        }
+    }
+}
+
+/// One option inside a BarValueControl popover.
+struct BarOptionRow: View {
+    let label: String
+    let selected: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        Button {
+            action()
+            dismiss()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(KineTheme.accent)
+                    .opacity(selected ? 1 : 0)
+                Text(label)
+                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                Spacer(minLength: 12)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(hovering ? KineTheme.accent.opacity(0.18) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// Timing options as popover rows (the context-menu picker stays for
+/// per-shot menus; this is the bar's on-brand version).
+struct TimingOptionRows: View {
+    let current: ShotTimingMode
+    let onPick: (ShotTimingMode) -> Void
+
+    var body: some View {
+        Group {
+            sectionLabel("Fixed")
+            ForEach([1, 2, 3, 4, 6, 8, 12], id: \.self) { f in
+                BarOptionRow(label: "\(f) frame\(f == 1 ? "" : "s") / still",
+                             selected: current == .fixedFramesPerStill(frames: f)) {
+                    onPick(.fixedFramesPerStill(frames: f))
+                }
+            }
+            sectionLabel("As Shot")
+            BarOptionRow(label: "Real time", selected: current == .asShot(rate: 1.0)) { onPick(.asShot(rate: 1.0)) }
+            BarOptionRow(label: "Half speed", selected: current == .asShot(rate: 0.5)) { onPick(.asShot(rate: 0.5)) }
+            BarOptionRow(label: "Double speed", selected: current == .asShot(rate: 2.0)) { onPick(.asShot(rate: 2.0)) }
+            sectionLabel("Frame Skip")
+            ForEach([2, 3, 4], id: \.self) { n in
+                BarOptionRow(label: "Every \(n == 2 ? "2nd" : n == 3 ? "3rd" : "\(n)th") still",
+                             selected: current == .frameSkip(every: n, frames: 3)) {
+                    onPick(.frameSkip(every: n, frames: 3))
+                }
+            }
+        }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.top, 6)
     }
 }

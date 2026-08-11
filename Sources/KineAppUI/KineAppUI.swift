@@ -31,7 +31,7 @@ public struct KineRootView: View {
 
     public var body: some View {
         content
-            .navigationTitle("\(workspace.project.name)\(workspace.isDirty ? " — edited" : "")")
+            .navigationTitle("\(workspace.project.name)\(workspace.isDirty ? " (edited)" : "")")
             // Video editors expect a dark UI all the time, regardless
             // of the system appearance. Forcing dark keeps the bin +
             // toolbar from washing out against the dark timeline.
@@ -154,6 +154,12 @@ public struct KineRootView: View {
         }
         .sheet(isPresented: $workspace.showingExportSheet) {
             ExportSheet(workspace: workspace)
+        }
+        .sheet(isPresented: $workspace.showingShotExportSheet) {
+            ShotExportSheet(workspace: workspace)
+        }
+        .sheet(item: $workspace.activeNotice) { notice in
+            KineNoticeSheet(notice: notice) { workspace.activeNotice = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: .kineShowEffectControls)) { _ in
             // ⇧⌘5 — flip the Source pane to the Effect Controls tab
@@ -701,7 +707,16 @@ private struct TimelineHostView: NSViewRepresentable {
         // pulls SwiftUI through `updateNSView` and into this push.
         let snapshot = workspace.previewCache.snapshot()
         view.audioPeaks = snapshot.waveforms.mapValues { $0.peaks }
-        view.videoThumbnails = snapshot.thumbs.mapValues { $0.images }
+        var thumbs = snapshot.thumbs.mapValues { $0.images }
+        // Shot clips (kine-shot://) never hit the AVFoundation preview
+        // cache; use the shot's own filmstrip samples.
+        for (clipID, clip) in workspace.project.mediaPool.clips where clip.url.scheme == "kine-shot" {
+            if let host = clip.url.host, let uuid = UUID(uuidString: host),
+               let images = workspace.shotThumbnails[ShotID(rawValue: uuid)] {
+                thumbs[clipID] = images
+            }
+        }
+        view.videoThumbnails = thumbs
         _ = workspace.previewVersion
 
         // Audio meters update via SwiftUI's playhead-driven re-renders

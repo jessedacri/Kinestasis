@@ -122,16 +122,14 @@ struct BinBrowserView: View {
     }
 
     private var shotExportMenu: some View {
-        Menu {
-            Button("ProRes 422 HQ…") { workspace.exportShots(codec: .proRes422HQ) }
-            Button("ProRes 4444…") { workspace.exportShots(codec: .proRes4444) }
+        Button {
+            workspace.beginShotExport(nil)
         } label: {
             Image(systemName: "square.and.arrow.up")
                 .font(.system(size: 10))
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Batch-export all shots")
+        .buttonStyle(.plain)
+        .help("Export shots…")
     }
 
     @ViewBuilder private var sequencesSection: some View {
@@ -313,10 +311,7 @@ private struct BurstShotRow: View {
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
             Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
                 .disabled(workspace.copiedShotGrade == nil)
-            Menu("Export Shot") {
-                Button("ProRes 422 HQ…") { workspace.exportShots([shot.id], codec: .proRes422HQ) }
-                Button("ProRes 4444…") { workspace.exportShots([shot.id], codec: .proRes4444) }
-            }
+            Button("Export Shot…") { workspace.beginShotExport([shot.id]) }
             Divider()
             Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
         }
@@ -338,6 +333,10 @@ private struct BurstShotRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .contentShape(Rectangle())
             .onTapGesture { workspace.selectShot(shot.id) }
+            .onDrag {
+                let clip = workspace.ensureShotClip(for: shot)
+                return NSItemProvider(object: clip.id.rawValue.uuidString as NSString)
+            }
         }
         .frame(height: 50)
     }

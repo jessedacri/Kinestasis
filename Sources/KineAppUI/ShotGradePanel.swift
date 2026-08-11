@@ -478,7 +478,7 @@ struct ShotGradePanel: View {
 
     private func exifSection(_ shot: BurstShot) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("EXIF — FRAME ON SCREEN")
+            Text("EXIF · FRAME ON SCREEN")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
             if exifFields.isEmpty {

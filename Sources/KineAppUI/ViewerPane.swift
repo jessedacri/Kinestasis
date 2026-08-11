@@ -325,11 +325,11 @@ private struct ScrubBar: View {
             HStack(spacing: 6) {
                 Spacer()
                 Text("I").markPill(active: inMark != nil)
-                Text(inMark.map(formatTimecode) ?? "—")
+                Text(inMark.map(formatTimecode) ?? "--")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Text("O").markPill(active: outMark != nil)
-                Text(outMark.map(formatTimecode) ?? "—")
+                Text(outMark.map(formatTimecode) ?? "--")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Spacer()

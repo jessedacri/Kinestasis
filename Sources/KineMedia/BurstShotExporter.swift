@@ -60,6 +60,7 @@ public struct BurstShotExporter: Sendable {
         codec: Codec,
         to directory: URL,
         filename: String? = nil,
+        maxLongEdge: Int? = nil,
         isCancelled: @Sendable () -> Bool = { false },
         progress: @Sendable (Double) -> Void = { _ in }
     ) throws -> URL {
@@ -80,8 +81,17 @@ public struct BurstShotExporter: Sendable {
         } else {
             throw ExportError.stillDecodeFailed(frames[0].url)
         }
-        let width = nativeSize.width - (nativeSize.width % 2)
-        let height = nativeSize.height - (nativeSize.height % 2)
+        // Optional long-edge cap from the export sheet (nil = native).
+        let outputSize: PixelSize
+        if let cap = maxLongEdge, cap < max(nativeSize.width, nativeSize.height) {
+            let scale = Double(cap) / Double(max(nativeSize.width, nativeSize.height))
+            outputSize = PixelSize(width: Int(Double(nativeSize.width) * scale),
+                                   height: Int(Double(nativeSize.height) * scale))
+        } else {
+            outputSize = nativeSize
+        }
+        let width = outputSize.width - (outputSize.width % 2)
+        let height = outputSize.height - (outputSize.height % 2)
 
         let outputURL = filename.map { directory.appendingPathComponent($0) }
             ?? Self.outputURL(for: shot, codec: codec, in: directory)
@@ -127,7 +137,7 @@ public struct BurstShotExporter: Sendable {
                 return outputURL
             }
             let stillURL = shot.sourceURL(for: frames[event.frameIndex])
-            let maxEdge = max(nativeSize.width, nativeSize.height)
+            let maxEdge = max(width, height)
             let ev = ExposureWobble.evOffset(
                 outputFrame: event.startFrame, fps: rate.fps,
                 intensity: shot.grade.wobbleIntensity, rate: shot.grade.wobbleRate)

@@ -4,6 +4,7 @@ import CoreVideo
 import CoreMedia
 import Metal
 import KineCore
+import KineMedia
 import PolymergePlayback
 
 /// Offline (pull-mode) compositor for a `Sequence`. Single source of
@@ -152,10 +153,14 @@ public final class OfflineSequenceCompositor {
         sequence: Sequence,
         mediaPool: MediaPool,
         outputWidth: Int? = nil,
-        outputHeight: Int? = nil
+        outputHeight: Int? = nil,
+        burstTiming: ShotTimingMode = .default,
+        stillPreviewLongEdge: Int? = nil
     ) throws {
         self.sequence = sequence
         self.mediaPool = mediaPool
+        self.burstTiming = burstTiming
+        self.stillPreviewLongEdge = stillPreviewLongEdge
         self.outputWidth  = outputWidth  ?? sequence.settings.resolution.width
         self.outputHeight = outputHeight ?? sequence.settings.resolution.height
 
@@ -1120,13 +1125,32 @@ public final class OfflineSequenceCompositor {
         return buf
     }
 
+    /// Project-level default timing for burst shots placed on the
+    /// timeline (per-shot overrides live on the shot itself).
+    public var burstTiming: ShotTimingMode
+    /// Longest-edge cap for still develops in realtime preview; nil =
+    /// native resolution (export).
+    public let stillPreviewLongEdge: Int?
+
     private func ensureFrameSource(key: DecoderKey, source: ClipSource) async throws -> VideoFrameSource {
         if let cached = frameSources[key] { return cached }
         let fs: VideoFrameSource
-        do {
-            fs = try await AVAssetFrameSource.load(url: source.url)
-        } catch {
-            throw CompositorError.frameSourceLoadFailed(error.localizedDescription)
+        if source.url.scheme == "kine-shot" {
+            // Burst shot placed directly on the timeline: frames come
+            // from the stills themselves, developed on demand.
+            guard let host = source.url.host, let uuid = UUID(uuidString: host),
+                  let shot = mediaPool.shots[ShotID(rawValue: uuid)] else {
+                throw CompositorError.frameSourceLoadFailed("shot missing for \(source.url)")
+            }
+            fs = ShotFrameSource(shot: shot, defaultTiming: burstTiming,
+                                 rate: sequence.settings.frameRate,
+                                 maxPixel: stillPreviewLongEdge ?? 100_000)
+        } else {
+            do {
+                fs = try await AVAssetFrameSource.load(url: source.url)
+            } catch {
+                throw CompositorError.frameSourceLoadFailed(error.localizedDescription)
+            }
         }
         frameSources[key] = fs
         return fs

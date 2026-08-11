@@ -342,7 +342,9 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                     sequence: sequence,
                     mediaPool: workspace.project.mediaPool,
                     outputWidth: spec.width,
-                    outputHeight: spec.height
+                    outputHeight: spec.height,
+                    burstTiming: workspace.project.settings.burst.timing,
+                    stillPreviewLongEdge: 2048
                 )
                 compositorSpec = spec
                 lastClipCount = -1
@@ -355,6 +357,7 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                 // currently reading these fields.
                 compositor?.sequence = sequence
                 compositor?.mediaPool = workspace.project.mediaPool
+                compositor?.burstTiming = workspace.project.settings.burst.timing
             }
             // Evict decoders for removed clips, but only when the clip
             // count actually changed — keeps the hot path allocation-free.

@@ -141,7 +141,7 @@ struct EffectControlsContent: View {
                         .foregroundStyle(scaleLocked ? KineTheme.accent : Color.secondary)
                 }
                 .buttonStyle(.plain)
-                .help(scaleLocked ? "X/Y linked — drag X or Y to scale uniformly" : "X/Y independent — drag each axis separately")
+                .help(scaleLocked ? "X/Y linked. Drag X or Y to scale uniformly" : "X/Y independent. Drag each axis separately")
 
                 numericLabel("X", widthHint: 14)
                 percentField(parameter: .scaleX, link: scaleLocked ? .scaleY : nil, range: 1...1000)
@@ -380,7 +380,7 @@ struct EffectControlsContent: View {
                 .foregroundStyle(active ? Color.orange : Color.secondary)
         }
         .buttonStyle(.plain)
-        .help(active ? "Disable keyframing — collapses to constant at the playhead value" : "Enable keyframing — value edits write a keyframe at the playhead")
+        .help(active ? "Disable keyframing. collapses to constant at the playhead value" : "Enable keyframing. value edits write a keyframe at the playhead")
     }
 
     @ViewBuilder
@@ -473,7 +473,7 @@ struct EffectControlsContent: View {
                     Image(systemName: "diamond")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    Text("No keyframes — toggle a stopwatch to start keyframing")
+                    Text("No keyframes. toggle a stopwatch to start keyframing")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }

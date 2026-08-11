@@ -174,7 +174,10 @@ public final class SequenceEncoder {
     // every Mac architecture; we don't need a real lock.
     nonisolated(unsafe) private var isCancelled: Bool = false
 
-    public init(sequence: Sequence, mediaPool: MediaPool) throws {
+    private let burstTiming: ShotTimingMode
+
+    public init(sequence: Sequence, mediaPool: MediaPool, burstTiming: ShotTimingMode = .default) throws {
+        self.burstTiming = burstTiming
         self.sequence = sequence
         self.mediaPool = mediaPool
     }
@@ -216,7 +219,8 @@ public final class SequenceEncoder {
         if let videoCodec = options.videoCodec {
             compositor = try OfflineSequenceCompositor(
                 sequence: sequence, mediaPool: mediaPool,
-                outputWidth: width, outputHeight: height
+                outputWidth: width, outputHeight: height,
+                burstTiming: burstTiming
             )
             self.compositor = compositor
 

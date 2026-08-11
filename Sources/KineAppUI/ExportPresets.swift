@@ -126,7 +126,7 @@ public enum ExportPresets {
     public static let professional: [ExportPreset] = [
         ExportPreset(
             id: "prores-422",
-            name: "ProRes 422 — Master",
+            name: "ProRes 422 · Master",
             group: .professional,
             summary: "ProRes 422 · Match Sequence · PCM",
             settings: ExportSettings(
@@ -137,7 +137,7 @@ public enum ExportPresets {
         ),
         ExportPreset(
             id: "prores-lt",
-            name: "ProRes 422 LT — Editorial",
+            name: "ProRes 422 LT · Editorial",
             group: .professional,
             summary: "ProRes 422 LT · Match Sequence · PCM",
             settings: ExportSettings(
@@ -148,7 +148,7 @@ public enum ExportPresets {
         ),
         ExportPreset(
             id: "prores-hq",
-            name: "ProRes 422 HQ — Delivery",
+            name: "ProRes 422 HQ · Delivery",
             group: .professional,
             summary: "ProRes 422 HQ · Match Sequence · PCM",
             settings: ExportSettings(
@@ -159,7 +159,7 @@ public enum ExportPresets {
         ),
         ExportPreset(
             id: "prores-proxy",
-            name: "ProRes 422 Proxy — Offline",
+            name: "ProRes 422 Proxy · Offline",
             group: .professional,
             summary: "ProRes 422 Proxy · Match Sequence · PCM",
             settings: ExportSettings(
@@ -170,7 +170,7 @@ public enum ExportPresets {
         ),
         ExportPreset(
             id: "prores-4444",
-            name: "ProRes 4444 — With Alpha",
+            name: "ProRes 4444 · With Alpha",
             group: .professional,
             summary: "ProRes 4444 · Match Sequence · PCM",
             settings: ExportSettings(

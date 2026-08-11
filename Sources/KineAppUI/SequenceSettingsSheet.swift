@@ -242,14 +242,14 @@ public enum SequencePreset: CaseIterable, Hashable {
     public var label: String {
         switch self {
         case .custom:          return "Custom"
-        case .hd1080_23_976:   return "1080p — 23.976 fps"
-        case .hd1080_24:       return "1080p — 24 fps"
-        case .hd1080_25:       return "1080p — 25 fps"
-        case .hd1080_29_97:    return "1080p — 29.97 fps"
-        case .hd1080_30:       return "1080p — 30 fps"
-        case .uhd_23_976:      return "UHD 4K — 23.976 fps"
-        case .uhd_29_97:       return "UHD 4K — 29.97 fps"
-        case .uhd_60:          return "UHD 4K — 60 fps"
+        case .hd1080_23_976:   return "1080p · 23.976 fps"
+        case .hd1080_24:       return "1080p · 24 fps"
+        case .hd1080_25:       return "1080p · 25 fps"
+        case .hd1080_29_97:    return "1080p · 29.97 fps"
+        case .hd1080_30:       return "1080p · 30 fps"
+        case .uhd_23_976:      return "UHD 4K · 23.976 fps"
+        case .uhd_29_97:       return "UHD 4K · 29.97 fps"
+        case .uhd_60:          return "UHD 4K · 60 fps"
         }
     }
 

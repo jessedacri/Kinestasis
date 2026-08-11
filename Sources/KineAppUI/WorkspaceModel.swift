@@ -645,6 +645,7 @@ public final class WorkspaceModel: ObservableObject {
         videoTrackIndex: Int = 0
     ) {
         guard let source = project.mediaPool.clips[clipID] else { return }
+        ensureSequenceForDrop(source: source)
         guard let sequenceIndex = project.sequences.firstIndex(where: { $0.id == activeSequenceID }) else { return }
         pushUndoSnapshot()
         let duration = max(0.04, sourceDuration)
@@ -802,6 +803,7 @@ public final class WorkspaceModel: ObservableObject {
     /// before- and after-pieces with a fresh shared ID.
     public func insertClip(_ clipID: ClipID, atTime time: RationalTime, videoTrackIndex: Int = 0) {
         guard let source = project.mediaPool.clips[clipID] else { return }
+        ensureSequenceForDrop(source: source)
         guard let sequenceIndex = project.sequences.firstIndex(where: { $0.id == activeSequenceID }) else { return }
         pushUndoSnapshot()
 
@@ -1682,7 +1684,7 @@ public final class WorkspaceModel: ObservableObject {
 
         let encoder: SequenceEncoder
         do {
-            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool)
+            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool, burstTiming: project.settings.burst.timing)
         } catch {
             renderError = error.localizedDescription
             return
@@ -1788,7 +1790,7 @@ public final class WorkspaceModel: ObservableObject {
 
         let encoder: SequenceEncoder
         do {
-            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool)
+            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool, burstTiming: project.settings.burst.timing)
         } catch {
             renderError = error.localizedDescription
             return
@@ -3666,6 +3668,56 @@ public final class WorkspaceModel: ObservableObject {
         return name
     }
 
+    /// Create or refresh the synthetic clip that represents a shot on the
+    /// timeline. URL scheme kine-shot://<uuid>; the compositor resolves it
+    /// to a ShotFrameSource, so placing a shot needs no baked render.
+    /// Kept out of the root bin (the bin lists the shot itself).
+    @discardableResult
+    public func ensureShotClip(for shot: BurstShot) -> ClipSource {
+        let url = URL(string: "kine-shot://\(shot.id.rawValue.uuidString)")!
+        let sched = schedule(for: shot)
+        let seconds = Double(ShotTimingEngine.totalFrames(sched)) / shotFrameRate.fps
+        let native = shot.effectiveFrames.first?.pixelSize ?? project.settings.defaultResolution
+        let resolution = PixelSize(width: native.width - native.width % 2,
+                                   height: native.height - native.height % 2)
+
+        if let existing = project.mediaPool.clips.values.first(where: { $0.url == url }) {
+            var clip = existing
+            clip.name = shot.name
+            clip.duration = RationalTime(value: Int64((seconds * 1000).rounded()), scale: 1000)
+            clip.videoTracks = [VideoTrackInfo(resolution: resolution, frameRate: shotFrameRate,
+                                               pixelFormat: "stills", colorSpace: .rec709)]
+            project.mediaPool.clips[clip.id] = clip
+            return clip
+        }
+        let clip = ClipSource(
+            url: url,
+            name: shot.name,
+            format: MediaFormat(container: "stills", videoCodec: "stills", audioCodec: nil),
+            duration: RationalTime(value: Int64((seconds * 1000).rounded()), scale: 1000),
+            videoTracks: [VideoTrackInfo(resolution: resolution, frameRate: shotFrameRate,
+                                         pixelFormat: "stills", colorSpace: .rec709)],
+            audioTracks: []
+        )
+        project.mediaPool.clips[clip.id] = clip
+        return clip
+    }
+
+    /// First drop into an empty project adopts the clip's own resolution
+    /// at the project rate; no dialog, no guessing.
+    private func ensureSequenceForDrop(source: ClipSource) {
+        let hasActive = activeSequenceID != nil
+            && project.sequences.contains { $0.id == activeSequenceID }
+        guard !hasActive else { return }
+        let res = source.videoTracks.first?.resolution ?? project.settings.defaultResolution
+        createSequence(
+            name: uniqueSequenceName(base: "Sequence"),
+            settings: SequenceSettings(
+                frameRate: shotFrameRate,
+                resolution: PixelSize(width: res.width - res.width % 2,
+                                      height: res.height - res.height % 2)))
+    }
+
     public func setIncludeInExport(_ include: Bool, for id: ShotID) {
         guard var shot = project.mediaPool.shots[id] else { return }
         shot.includeInExport = include
@@ -3813,148 +3865,6 @@ public final class WorkspaceModel: ObservableObject {
     public func pasteGrade(to id: ShotID) {
         guard let grade = copiedShotGrade else { return }
         setShotGrade(grade, for: id)
-    }
-
-    // MARK: - Assembly (shots → timeline)
-
-    public static var renderedShotsDirectory: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Kinestasis", isDirectory: true)
-            .appendingPathComponent("RenderedShots", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
-    /// Stable content hash over everything that affects a shot's rendered
-    /// pixels + timing — cache key for assembly renders.
-    private func renderHash(for shot: BurstShot, rate: FrameRate, defaults: ShotTimingMode) -> String {
-        struct Key: Codable {
-            let paths: [String]; let times: [Double]
-            let mode: ShotTimingMode; let ramp: [CurvePoint]
-            let grade: ShotGrade; let rate: String
-        }
-        let key = Key(paths: shot.frames.map(\.url.path), times: shot.frames.map(\.captureTime),
-                      mode: shot.timing(projectDefault: defaults), ramp: shot.speedRamp,
-                      grade: shot.grade, rate: rate.rawValue)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        let data = (try? encoder.encode(key)) ?? Data()
-        var hash: UInt64 = 0xcbf29ce484222325
-        for byte in data { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
-        return String(format: "%016llx", hash)
-    }
-
-    /// Render every shot (cache-aware) to intermediate ProRes, import the
-    /// renders as clips, and lay them on an "Assembly" sequence in bin
-    /// order — then switch to Assemble mode for trimming + final export.
-    /// Timeline sources ARE the rendered files, so the cut is WYSIWYG
-    /// with the batch export by construction.
-    public func assembleShots() {
-        let shots = exportableShots
-        guard !shots.isEmpty, shotExportProgress == nil else { return }
-        let rate = shotFrameRate
-        let defaults = project.settings.burst.timing
-        let exporter = BurstShotExporter()
-        let directory = Self.renderedShotsDirectory
-        let jobs: [(BurstShot, String)] = shots.map { ($0, "\($0.name)-\(renderHash(for: $0, rate: rate, defaults: defaults)).mov") }
-
-        // Never start a long render without saying what it is, where it
-        // writes, and roughly how big — and it's cancellable once running.
-        let toRender = jobs.filter { !FileManager.default.fileExists(atPath: directory.appendingPathComponent($0.1).path) }
-        if !toRender.isEmpty {
-            let stills = toRender.reduce(0) { $0 + $1.0.effectiveFrames.count }
-            let alert = NSAlert()
-            alert.messageText = "Render \(toRender.count) shot\(toRender.count == 1 ? "" : "s") for assembly?"
-            alert.informativeText =
-                "Assembly renders each included shot to a ProRes intermediate, then lays them on a timeline for trimming and a single-movie export.\n\n"
-                + "\(toRender.count) of \(shots.count) shots need rendering (\(stills) stills at native resolution — RAW sources can take a while). Already-rendered shots are reused.\n\n"
-                + "Intermediates: ~/Library/Application Support/Kinestasis/RenderedShots\n"
-                + "You can stop anytime with the \u{2715} next to the progress bar."
-            alert.addButton(withTitle: "Render & Assemble")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-
-        shotExportProgress = 0
-        shotBatchLabel = "Assembling \(shots.count) shot\(shots.count == 1 ? "" : "s")…"
-        let cancel = CancelToken()
-        batchCancelToken = cancel
-
-        Task.detached(priority: .userInitiated) {
-            var rendered: [(BurstShot, URL)] = []
-            var failures: [String] = []
-            for (i, job) in jobs.enumerated() {
-                if cancel.isCancelled { break }
-                let (shot, filename) = job
-                let url = directory.appendingPathComponent(filename)
-                if !FileManager.default.fileExists(atPath: url.path) {
-                    do {
-                        try exporter.export(shot: shot, mode: shot.timing(projectDefault: defaults),
-                                            rate: rate, codec: .proRes422HQ,
-                                            to: directory, filename: filename,
-                                            isCancelled: { cancel.isCancelled })
-                        if cancel.isCancelled { break }
-                    } catch {
-                        failures.append("\(shot.name): \(error.localizedDescription)")
-                        continue
-                    }
-                }
-                rendered.append((shot, url))
-                let fraction = Double(i + 1) / Double(jobs.count)
-                await MainActor.run { self.shotExportProgress = fraction }
-            }
-            let wasCancelled = cancel.isCancelled
-            await MainActor.run {
-                self.shotExportProgress = nil
-                self.shotBatchLabel = nil
-                self.batchCancelToken = nil
-                if !wasCancelled {
-                    self.finishAssembly(rendered: rendered, rate: rate, failures: failures)
-                }
-            }
-        }
-    }
-
-    private func finishAssembly(rendered: [(BurstShot, URL)], rate: FrameRate, failures: [String]) {
-        guard !rendered.isEmpty else {
-            if !failures.isEmpty { presentAssemblyFailures(failures) }
-            return
-        }
-        Task { @MainActor in
-            // Sequence sized to the largest rendered shot.
-            let firstSize = rendered.compactMap { $0.0.frames.first?.pixelSize }.max(by: { $0.width < $1.width })
-                ?? project.settings.defaultResolution
-            let settings = SequenceSettings(
-                frameRate: rate,
-                resolution: PixelSize(width: firstSize.width - firstSize.width % 2,
-                                      height: firstSize.height - firstSize.height % 2))
-            let name = uniqueSequenceName(base: "Assembly")
-            createSequence(name: name, settings: settings)
-
-            var cursor = RationalTime.zero
-            for (shot, url) in rendered {
-                let clipID: ClipID
-                if let existing = project.mediaPool.clips.values.first(where: { $0.url == url }) {
-                    clipID = existing.id
-                } else if let probed = try? await prober.probe(url: url) {
-                    var clip = probed
-                    clip.name = "\(shot.name) (rendered)"
-                    project.mediaPool.clips[clip.id] = clip
-                    project.mediaPool.rootBin.children.append(.clip(clip.id))
-                    schedulePreviews(for: clip)
-                    clipID = clip.id
-                } else {
-                    continue
-                }
-                insertClip(clipID, atTime: cursor)
-                if let placed = project.mediaPool.clips[clipID] {
-                    let endSeconds = cursor.seconds + placed.duration.seconds
-                    cursor = RationalTime(value: Int64((endSeconds * 1000).rounded()), scale: 1000)
-                }
-            }
-            appMode = .assemble
-            if !failures.isEmpty { presentAssemblyFailures(failures) }
-        }
     }
 
     private func uniqueSequenceName(base: String) -> String {
@@ -4288,19 +4198,28 @@ public final class WorkspaceModel: ObservableObject {
 
     // MARK: - Shot batch export
 
-    /// Batch-export shots to ProRes, one movie per shot, into a directory
-    /// the user picks. `ids` nil → every shot in bin order.
-    public func exportShots(_ ids: [ShotID]? = nil, codec: BurstShotExporter.Codec) {
+    /// Export-sheet state: which shots the sheet targets (nil = all
+    /// included) and whether it is visible.
+    @Published public var showingShotExportSheet = false
+    public var shotExportTarget: [ShotID]? = nil
+
+    public func beginShotExport(_ ids: [ShotID]?) {
+        guard shotExportProgress == nil else { return }
+        shotExportTarget = ids
+        showingShotExportSheet = true
+    }
+
+    public var shotsForExportTarget: [BurstShot] {
+        shotExportTarget.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? exportableShots
+    }
+
+    /// Batch-export shots to ProRes, one movie per shot. Driven by the
+    /// export sheet: destination, codec, optional long-edge cap, optional
+    /// FCPXML sidecar.
+    public func exportShots(_ ids: [ShotID]?, codec: BurstShotExporter.Codec,
+                            to directory: URL, longEdge: Int? = nil, writeSidecar: Bool = false) {
         let shots = ids.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? exportableShots
         guard !shots.isEmpty, shotExportProgress == nil else { return }
-
-        let panel = NSOpenPanel()
-        panel.title = "Choose Export Folder"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Export \(shots.count) Shot\(shots.count == 1 ? "" : "s")"
-        guard panel.runModal() == .OK, let directory = panel.url else { return }
 
         let defaults = project.settings.burst.timing
         let rate = shotFrameRate
@@ -4323,6 +4242,7 @@ public final class WorkspaceModel: ObservableObject {
                         rate: rate,
                         codec: codec,
                         to: directory,
+                        maxLongEdge: longEdge,
                         isCancelled: { cancel.isCancelled }
                     )
                     if cancel.isCancelled { break }
@@ -4339,7 +4259,7 @@ public final class WorkspaceModel: ObservableObject {
                 let fraction = Double(i + 1) / Double(shots.count)
                 await MainActor.run { self.shotExportProgress = fraction }
             }
-            if !sidecarEntries.isEmpty && !cancel.isCancelled {
+            if writeSidecar && !sidecarEntries.isEmpty && !cancel.isCancelled {
                 do {
                     _ = try ShotBatchXMLSidecar().write(
                         entries: sidecarEntries, rate: rate, to: directory, batchName: batchName)
@@ -4352,12 +4272,23 @@ public final class WorkspaceModel: ObservableObject {
                 self.shotBatchLabel = nil
                 self.batchCancelToken = nil
                 if !failures.isEmpty {
-                    let alert = NSAlert()
-                    alert.messageText = "Some shots failed to export"
-                    alert.informativeText = failures.joined(separator: "\n")
-                    alert.runModal()
+                    self.presentNotice(title: "Some shots failed to export",
+                                       message: failures.joined(separator: "\n"))
                 }
             }
         }
+    }
+
+    // MARK: - On-brand notices (no system alerts)
+
+    public struct Notice: Identifiable {
+        public let id = UUID()
+        public let title: String
+        public let message: String
+    }
+    @Published public var activeNotice: Notice? = nil
+
+    public func presentNotice(title: String, message: String) {
+        activeNotice = Notice(title: title, message: message)
     }
 }
