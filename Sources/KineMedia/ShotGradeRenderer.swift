@@ -21,16 +21,72 @@ public final class ShotGradeRenderer: @unchecked Sendable {
     }
 
     /// Decode + grade + downscale to `maxPixel` on the longest edge.
-    /// Identity grades short-circuit to the plain decoder.
-    public func render(url: URL, grade: ShotGrade, maxPixel: Int) -> CGImage? {
-        guard !grade.isIdentity else {
+    /// Identity grades short-circuit to the plain decoder. `evOffset` adds
+    /// exposure wobble for this frame; `grainSeed` shifts the grain field
+    /// so it animates frame to frame.
+    public func render(url: URL, grade: ShotGrade, maxPixel: Int, evOffset: Double = 0, grainSeed: Int64 = 0) -> CGImage? {
+        guard !grade.isIdentity || evOffset != 0 else {
             return StillDecoder.decode(url: url, maxPixel: maxPixel)
         }
-        guard var image = developed(url: url, grade: grade, maxPixel: maxPixel) else { return nil }
-        image = applyToneAndLook(image, grade: grade, isRAW: Self.rawExtensions.contains(url.pathExtension.lowercased()))
+        var effective = grade
+        effective.exposure += evOffset
+        guard var image = developed(url: url, grade: effective, maxPixel: maxPixel) else { return nil }
+        image = applyToneAndLook(image, grade: effective, isRAW: Self.rawExtensions.contains(url.pathExtension.lowercased()))
+        if grade.grainAmount > 0 {
+            image = applyGrain(image, grade: grade, seed: grainSeed)
+        }
         let extent = image.extent
         guard !extent.isInfinite, extent.width > 0 else { return nil }
         return context.createCGImage(image, from: extent)
+    }
+
+    /// Film grain: luma noise soft-lit over the image, sized by
+    /// `grainSize`, weighted toward shadows or highlights by
+    /// `grainResponse`. The infinite CIRandomGenerator field is translated
+    /// per frame so grain animates instead of sitting static.
+    private func applyGrain(_ input: CIImage, grade: ShotGrade, seed: Int64) -> CIImage {
+        guard let noiseSource = CIFilter(name: "CIRandomGenerator")?.outputImage else { return input }
+        let extent = input.extent
+        let size = max(0.5, grade.grainSize)
+        let offsetX = CGFloat((seed &* 73) % 4096) + 2048
+        let offsetY = CGFloat((seed &* 149) % 4096) + 2048
+
+        // Monochrome noise centered on mid-gray, amplitude from amount.
+        let amplitude = grade.grainAmount / 100 * 0.5
+        var noise = noiseSource
+            .transformed(by: CGAffineTransform(translationX: offsetX, y: offsetY)
+                .scaledBy(x: size, y: size))
+            .cropped(to: extent)
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: CGFloat(amplitude), y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: CGFloat(amplitude), y: 0, z: 0, w: 0),
+                "inputBVector": CIVector(x: CGFloat(amplitude), y: 0, z: 0, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: CGFloat(0.5 - amplitude / 2), y: CGFloat(0.5 - amplitude / 2), z: CGFloat(0.5 - amplitude / 2), w: 0),
+            ])
+        noise = noise.applyingFilter("CISoftLightBlendMode", parameters: [
+            kCIInputBackgroundImageKey: input,
+        ])
+
+        let response = grade.grainResponse
+        guard response != 0 else { return noise }
+
+        // Bias: mask from image luminance (or its inverse) selects where
+        // the grained version shows through.
+        var luma = input.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
+        if response < 0 {
+            luma = luma.applyingFilter("CIColorInvert")
+        }
+        let strength = min(1, abs(response) / 100)
+        let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: extent)
+        let mask = strength >= 1 ? luma : luma.applyingFilter("CIMix", parameters: [
+            "inputBackgroundImage": white,
+            "inputAmount": strength,
+        ])
+        return noise.applyingFilter("CIBlendWithMask", parameters: [
+            kCIInputBackgroundImageKey: input,
+            kCIInputMaskImageKey: mask,
+        ])
     }
 
     /// The developed (but ungraded-downstream) base image. RAW: CIRAWFilter

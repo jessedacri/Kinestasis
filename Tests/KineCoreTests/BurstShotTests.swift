@@ -139,4 +139,57 @@ final class BurstShotTests: XCTestCase {
         let settings = try JSONDecoder().decode(ProjectSettings.self, from: json)
         XCTAssertEqual(settings.burst, .default)
     }
+
+    // MARK: - Speed ramp
+
+    func testRampEmptyIsUnchanged() {
+        let frames = (0..<4).map { frame(Double($0)) }
+        let base = ShotTimingEngine.schedule(frames: frames, mode: .fixedFramesPerStill(frames: 3), rate: .twentyFour)
+        XCTAssertEqual(ShotTimingEngine.applyRamp(base, ramp: []), base)
+    }
+
+    func testRampPreservesTotalDuration() {
+        let frames = (0..<6).map { frame(Double($0)) }
+        let base = ShotTimingEngine.schedule(frames: frames, mode: .fixedFramesPerStill(frames: 4), rate: .twentyFour)
+        let ramp = [CurvePoint(x: 0, y: 0), CurvePoint(x: 0.5, y: 0.85), CurvePoint(x: 1, y: 1)]
+        let out = ShotTimingEngine.applyRamp(base, ramp: ramp)
+        XCTAssertEqual(ShotTimingEngine.totalFrames(out), ShotTimingEngine.totalFrames(base))
+        // Contiguous, monotone still order.
+        for (a, b) in zip(out, out.dropFirst()) {
+            XCTAssertEqual(a.startFrame + a.frameCount, b.startFrame)
+            XCTAssertLessThan(a.frameIndex, b.frameIndex)
+        }
+    }
+
+    func testRampRedistributesScreenTime() {
+        // Fast first half (steep), lingering second half (flat): early
+        // stills get less screen time than late ones.
+        let frames = (0..<8).map { frame(Double($0)) }
+        let base = ShotTimingEngine.schedule(frames: frames, mode: .fixedFramesPerStill(frames: 6), rate: .twentyFour)
+        let ramp = [CurvePoint(x: 0, y: 0), CurvePoint(x: 0.3, y: 0.8), CurvePoint(x: 1, y: 1)]
+        let out = ShotTimingEngine.applyRamp(base, ramp: ramp)
+        XCTAssertLessThan(out.first!.frameCount, out.last!.frameCount)
+    }
+
+    // MARK: - Exposure wobble
+
+    func testWobbleDeterministicAndBounded() {
+        let a = ExposureWobble.evOffset(outputFrame: 7, fps: 24, intensity: 100, rate: 4)
+        let b = ExposureWobble.evOffset(outputFrame: 7, fps: 24, intensity: 100, rate: 4)
+        XCTAssertEqual(a, b)
+        for f in 0..<200 {
+            let ev = ExposureWobble.evOffset(outputFrame: Int64(f), fps: 24, intensity: 100, rate: 4)
+            XCTAssertLessThanOrEqual(abs(ev), ExposureWobble.maxEV + 1e-9)
+        }
+    }
+
+    func testWobbleZeroIntensityIsZero() {
+        XCTAssertEqual(ExposureWobble.evOffset(outputFrame: 3, fps: 24, intensity: 0, rate: 4), 0)
+    }
+
+    func testWobbleScalesWithIntensity() {
+        let full = ExposureWobble.evOffset(outputFrame: 13, fps: 24, intensity: 100, rate: 4)
+        let half = ExposureWobble.evOffset(outputFrame: 13, fps: 24, intensity: 50, rate: 4)
+        XCTAssertEqual(half, full / 2, accuracy: 1e-12)
+    }
 }

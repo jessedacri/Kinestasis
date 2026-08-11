@@ -51,22 +51,60 @@ public struct ShotGrade: Codable, Sendable, Hashable {
     public var lutPath: String?
     public var lutIntensity: Double  // 0 … 100
 
+    // Texture (K3). Grain rides along with looks/copy-paste on purpose —
+    // a "look" that includes its grain travels as one unit.
+    public var grainAmount: Double     // 0 (off) … 100
+    public var grainSize: Double       // 0.5 … 4, 1 = native noise scale
+    public var grainResponse: Double   // -100 (shadows) … +100 (highlights), 0 = uniform
+    public var wobbleIntensity: Double // 0 (off) … 100 → up to ±0.3 EV
+    public var wobbleRate: Double      // Hz, 0.5 … 12
+
     public static let identity = ShotGrade()
 
     public init(exposure: Double = 0, contrast: Double = 0, temperature: Double = 0, tint: Double = 0,
                 highlights: Double = 0, shadows: Double = 0, saturation: Double = 0,
-                blackAndWhite: Bool = false, lutPath: String? = nil, lutIntensity: Double = 100) {
+                blackAndWhite: Bool = false, lutPath: String? = nil, lutIntensity: Double = 100,
+                grainAmount: Double = 0, grainSize: Double = 1, grainResponse: Double = 0,
+                wobbleIntensity: Double = 0, wobbleRate: Double = 4) {
         self.exposure = exposure; self.contrast = contrast
         self.temperature = temperature; self.tint = tint
         self.highlights = highlights; self.shadows = shadows
         self.saturation = saturation; self.blackAndWhite = blackAndWhite
         self.lutPath = lutPath; self.lutIntensity = lutIntensity
+        self.grainAmount = grainAmount; self.grainSize = grainSize; self.grainResponse = grainResponse
+        self.wobbleIntensity = wobbleIntensity; self.wobbleRate = wobbleRate
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case exposure, contrast, temperature, tint, highlights, shadows, saturation
+        case blackAndWhite, lutPath, lutIntensity
+        case grainAmount, grainSize, grainResponse, wobbleIntensity, wobbleRate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        exposure = try c.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
+        contrast = try c.decodeIfPresent(Double.self, forKey: .contrast) ?? 0
+        temperature = try c.decodeIfPresent(Double.self, forKey: .temperature) ?? 0
+        tint = try c.decodeIfPresent(Double.self, forKey: .tint) ?? 0
+        highlights = try c.decodeIfPresent(Double.self, forKey: .highlights) ?? 0
+        shadows = try c.decodeIfPresent(Double.self, forKey: .shadows) ?? 0
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 0
+        blackAndWhite = try c.decodeIfPresent(Bool.self, forKey: .blackAndWhite) ?? false
+        lutPath = try c.decodeIfPresent(String.self, forKey: .lutPath)
+        lutIntensity = try c.decodeIfPresent(Double.self, forKey: .lutIntensity) ?? 100
+        grainAmount = try c.decodeIfPresent(Double.self, forKey: .grainAmount) ?? 0
+        grainSize = try c.decodeIfPresent(Double.self, forKey: .grainSize) ?? 1
+        grainResponse = try c.decodeIfPresent(Double.self, forKey: .grainResponse) ?? 0
+        wobbleIntensity = try c.decodeIfPresent(Double.self, forKey: .wobbleIntensity) ?? 0
+        wobbleRate = try c.decodeIfPresent(Double.self, forKey: .wobbleRate) ?? 4
     }
 
     public var isIdentity: Bool {
         exposure == 0 && contrast == 0 && temperature == 0 && tint == 0
             && highlights == 0 && shadows == 0 && saturation == 0
             && !blackAndWhite && (lutPath == nil || lutIntensity == 0)
+            && grainAmount == 0 && wobbleIntensity == 0
     }
 }
 
@@ -79,16 +117,21 @@ public struct BurstShot: Codable, Sendable, Identifiable {
     /// nil → the project-wide default timing applies.
     public var timingOverride: ShotTimingMode?
     public var grade: ShotGrade
+    /// Monotone time-remap curve (x: output progress, y: source progress),
+    /// 0…1 both axes. Empty or < 2 points = no ramp. Total duration is
+    /// preserved; the curve redistributes it.
+    public var speedRamp: [CurvePoint]
 
-    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity) {
+    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = []) {
         self.id = id
         self.name = name
         self.frames = frames
         self.timingOverride = timingOverride
         self.grade = grade
+        self.speedRamp = speedRamp
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade }
+    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade, speedRamp }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -97,6 +140,7 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         frames = try c.decode([StillFrame].self, forKey: .frames)
         timingOverride = try c.decodeIfPresent(ShotTimingMode.self, forKey: .timingOverride)
         grade = try c.decodeIfPresent(ShotGrade.self, forKey: .grade) ?? .identity
+        speedRamp = try c.decodeIfPresent([CurvePoint].self, forKey: .speedRamp) ?? []
     }
 
     public func timing(projectDefault: ShotTimingMode) -> ShotTimingMode {
@@ -226,6 +270,38 @@ public enum ShotTimingEngine {
     public static func totalFrames(_ schedule: [StillEvent]) -> Int64 {
         guard let last = schedule.last else { return 0 }
         return last.startFrame + last.frameCount
+    }
+
+    /// Apply a monotone time-remap curve (x: output progress → y: source
+    /// progress) to a schedule. Total duration is preserved; screen time is
+    /// redistributed — a flat curve segment lingers, a steep one rushes.
+    /// Fewer than 2 points = unchanged.
+    public static func applyRamp(_ schedule: [StillEvent], ramp: [CurvePoint]) -> [StillEvent] {
+        let total = totalFrames(schedule)
+        guard schedule.count > 0, ramp.count >= 2, total > 1 else { return schedule }
+        let curve = ToneCurve(ramp)
+        var events: [StillEvent] = []
+        var maxSourceFrame: Int64 = 0   // guards against time reversal if points cross
+        for f in 0..<total {
+            let progress = Double(f) / Double(total - 1)
+            let sourcePos = curve.evaluate(progress)
+            let sourceFrame = max(maxSourceFrame, Int64((sourcePos * Double(total - 1)).rounded()))
+            maxSourceFrame = sourceFrame
+            let idx = event(at: sourceFrame, in: schedule)?.frameIndex ?? schedule[0].frameIndex
+            if let last = events.last, last.frameIndex == idx {
+                events[events.count - 1] = StillEvent(
+                    frameIndex: idx, startFrame: last.startFrame, frameCount: last.frameCount + 1)
+            } else {
+                events.append(StillEvent(frameIndex: idx, startFrame: Int64(f), frameCount: 1))
+            }
+        }
+        return events
+    }
+
+    /// Full schedule for a shot: timing mode, then the speed ramp.
+    public static func schedule(for shot: BurstShot, projectDefault: ShotTimingMode, rate: FrameRate) -> [StillEvent] {
+        let base = schedule(frames: shot.frames, mode: shot.timing(projectDefault: projectDefault), rate: rate)
+        return applyRamp(base, ramp: shot.speedRamp)
     }
 
     /// The still on screen at `frame`, or the last one past the end.

@@ -391,7 +391,8 @@ private struct BurstShotRow: View {
     /// Live stats: recomputed whenever the timing mode, override, or
     /// project frame rate changes (all flow through `workspace.project`).
     private var metadataLine: some View {
-        let schedule = ShotTimingEngine.schedule(frames: shot.frames, mode: mode, rate: rate)
+        let schedule = ShotTimingEngine.schedule(
+            for: shot, projectDefault: workspace.project.settings.burst.timing, rate: rate)
         let outFrames = ShotTimingEngine.totalFrames(schedule)
         let outSeconds = Double(outFrames) / rate.fps
         var bits: [String] = []

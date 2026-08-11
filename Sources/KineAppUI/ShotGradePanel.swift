@@ -27,6 +27,10 @@ struct ShotGradePanel: View {
                         Divider()
                         lutSection(shot)
                         Divider()
+                        textureSection(shot)
+                        Divider()
+                        rampSection(shot)
+                        Divider()
                         looksSection(shot)
                     }
                     .padding(12)
@@ -216,6 +220,59 @@ struct ShotGradePanel: View {
                         .frame(width: 44, alignment: .trailing)
                 }
             }
+        }
+    }
+
+    // MARK: - Texture (grain + wobble)
+
+    private func textureSection(_ shot: BurstShot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("TEXTURE").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            gradeRow(shot, "Grain", range: 0...100, format: "%.0f",
+                     get: \.grainAmount) { $0.grainAmount = $1 }
+            if shot.grade.grainAmount > 0 {
+                gradeRow(shot, "Grain Size", range: 0.5...4, format: "%.1f",
+                         get: \.grainSize) { $0.grainSize = $1 }
+                gradeRow(shot, "Response", range: -100...100, format: "%+.0f",
+                         get: \.grainResponse) { $0.grainResponse = $1 }
+                Text("Response < 0 favors shadows, > 0 highlights")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+            gradeRow(shot, "Wobble", range: 0...100, format: "%.0f",
+                     get: \.wobbleIntensity) { $0.wobbleIntensity = $1 }
+            if shot.grade.wobbleIntensity > 0 {
+                gradeRow(shot, "Wobble Rate", range: 0.5...12, format: "%.1f Hz",
+                         get: \.wobbleRate) { $0.wobbleRate = $1 }
+                Text("Per-frame exposure flicker — shows on export/playback, not this still")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    // MARK: - Speed ramp
+
+    private func rampSection(_ shot: BurstShot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("SPEED RAMP").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+                if !shot.speedRamp.isEmpty {
+                    Button("Reset") { workspace.setShotRamp([], for: shot.id) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10))
+                        .foregroundStyle(KineTheme.accent)
+                }
+            }
+            RampCurveEditor(
+                points: shot.speedRamp,
+                onChange: { pts in workspace.setShotRamp(pts, for: shot.id) }
+            )
+            .frame(height: 120)
+            Text("Steep = fast, flat = linger. Duration stays the same.")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
         }
     }
 

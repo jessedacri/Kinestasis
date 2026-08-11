@@ -3632,6 +3632,14 @@ public final class WorkspaceModel: ObservableObject {
         markDirty()
     }
 
+    public func setShotRamp(_ ramp: [CurvePoint], for id: ShotID) {
+        guard var shot = project.mediaPool.shots[id] else { return }
+        shot.speedRamp = ramp
+        project.mediaPool.shots[id] = shot
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
     public func copyGrade(from id: ShotID) {
         copiedShotGrade = project.mediaPool.shots[id]?.grade
     }
