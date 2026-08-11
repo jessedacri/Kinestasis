@@ -3,10 +3,21 @@ import Foundation
 public struct MediaPool: Codable, Sendable {
     public var rootBin: Bin
     public var clips: [ClipID: ClipSource]
+    public var shots: [ShotID: BurstShot]
 
-    public init(rootBin: Bin = Bin(name: "Master"), clips: [ClipID: ClipSource] = [:]) {
+    public init(rootBin: Bin = Bin(name: "Master"), clips: [ClipID: ClipSource] = [:], shots: [ShotID: BurstShot] = [:]) {
         self.rootBin = rootBin
         self.clips = clips
+        self.shots = shots
+    }
+
+    private enum CodingKeys: String, CodingKey { case rootBin, clips, shots }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rootBin = try c.decode(Bin.self, forKey: .rootBin)
+        clips = try c.decode([ClipID: ClipSource].self, forKey: .clips)
+        shots = try c.decodeIfPresent([ShotID: BurstShot].self, forKey: .shots) ?? [:]
     }
 }
 
@@ -23,6 +34,7 @@ public struct Bin: Codable, Sendable, Identifiable {
 public enum BinItem: Codable, Sendable {
     case bin(Bin)
     case clip(ClipID)
+    case shot(ShotID)
 }
 
 /// A marked sub-range of a source clip — FCP-style "favorite" / "reject".

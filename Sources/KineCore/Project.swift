@@ -50,12 +50,32 @@ public struct ProjectSettings: Codable, Sendable {
     public var defaultFrameRate: FrameRate
     public var defaultResolution: PixelSize
     public var defaultColorSpace: ColorSpace
+    public var burst: BurstDefaults
 
     public static let `default` = ProjectSettings(
         defaultFrameRate: .twentyFour,
         defaultResolution: PixelSize(width: 1920, height: 1080),
         defaultColorSpace: .rec709
     )
+
+    public init(defaultFrameRate: FrameRate, defaultResolution: PixelSize, defaultColorSpace: ColorSpace, burst: BurstDefaults = .default) {
+        self.defaultFrameRate = defaultFrameRate
+        self.defaultResolution = defaultResolution
+        self.defaultColorSpace = defaultColorSpace
+        self.burst = burst
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case defaultFrameRate, defaultResolution, defaultColorSpace, burst
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        defaultFrameRate = try c.decode(FrameRate.self, forKey: .defaultFrameRate)
+        defaultResolution = try c.decode(PixelSize.self, forKey: .defaultResolution)
+        defaultColorSpace = try c.decode(ColorSpace.self, forKey: .defaultColorSpace)
+        burst = try c.decodeIfPresent(BurstDefaults.self, forKey: .burst) ?? .default
+    }
 }
 
 public struct PixelSize: Hashable, Codable, Sendable {
