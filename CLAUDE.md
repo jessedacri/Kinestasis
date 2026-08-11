@@ -4,7 +4,7 @@
 
 Kinestasis is a macOS app that turns burst-mode photo sets into video clips. Drag in a folder of stills (JPEG + OEM RAW); the app groups them into shots by capture-time gaps, previews them as draggable filmstrips, applies per-clip cadence (frames-per-still / as-shot timing / frame-skip), camera-raw-style grades, LUTs, film grain, and batch-exports ProRes clips at native resolution plus XML for NLE handoff. The signature aesthetic: 8–12 fps stills cadence, silent-film feel.
 
-Forked from Preem (the macOS NLE, `~/Preem`) on 2026-08-10 per `WCID-WORKORDER.md` — same layered engine, pointed at a different product. The NLE ambition stays parked in Preem.
+**Standalone WCID project** (registered with the portfolio manager, ~/WCID). Forked from Preem (the macOS NLE, `~/Preem`) on 2026-08-10 — same layered engine, pointed at a different product — and now fully independent: Preem continues separately and is never modified from here. The originating work order (`WCID-WORKORDER.md`) is closed.
 
 **Video compatibility (Jesse, 2026-08-10):** users may drop video files into a burst folder and expect them interpreted with the same look/feel as stills. AVFoundation video ingest (MOV/MP4/M4V — probe, thumbnails, skim, audio, playback) is retained; a video file becomes a shot alongside still-groups and shares the grade/grain pipeline. Only Preem's MXF-specific native demuxer path and the ML module (slate OCR / shot classifier / transcription) were pruned.
 
@@ -56,9 +56,16 @@ Shared media-engine package at `../PolymergeKit` (own git repo), consumed via lo
 
 `docs/` is inherited from Preem and still uses Preem-era names (Preem*, MXF, ML). Engine explanations (COMPOSITOR.md render invariants, TIMELINE.md editing model, COLOR.md pipeline) remain accurate for the shared machinery — read them for how things work, not for product scope. `docs/HANDOFF.md` state pointers describe Preem, not Kinestasis.
 
-## Work order & status
+## Where to look next
 
-`WCID-WORKORDER.md` (repo root) is the build plan: K1 ingest/grouping/timing/export → K2 grade → K3 motion/texture → K4 XML/assembly/DMG. Mark checkboxes there as tasks complete.
+- **`docs/KINESTASIS-HANDOFF.md`** — session entry point: state, footguns (whole-second EXIF spreading, RAW+JPEG pairs, grid-scroll laziness, export ≡ playback texture, force-dark NSApp, UI copy rules), next-steps queue, file map.
+- `WCID.md` — portfolio status for the WCID manager; update after substantive work.
+- `WCID-WORKORDER.md` — the closed founding work order (historical).
+- Inherited `docs/*.md` (Preem-era names) — engine mechanism reference: COMPOSITOR.md render invariants, TIMELINE.md editing model, COLOR.md.
+
+## UI ground rules (Jesse-directed)
+
+Shots-first workspace is the home screen; the inherited NLE layout lives behind Assemble mode only. No em dashes in UI strings. Dialogs are on-brand KineTheme sheets, never system alerts, in the shots flow. Long operations announce what/where and are cancellable. Settings render as always-visible value controls with on-brand popovers. The app is force-dark at the NSApp level.
 
 ## WCID
 After substantive work in this project, update `WCID.md` in this directory — it is how the WCID portfolio manager (~/WCID) tracks this project without crawling it.
