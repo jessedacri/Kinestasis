@@ -93,8 +93,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         // Dock icon (SPM executable has no .app bundle/Info.plist icon, so
-        // set it at runtime). Kine's mark: timeline-track bars — the
-        // Polymerge waveform turned on its side.
+        // set it at runtime). The mark: a burst card with amber motion
+        // echoes, drawn on the standard 824/1024 icon grid so it sits at
+        // the same size as every other Dock icon.
         if let url = Bundle.module.url(forResource: "KineIcon", withExtension: "png"),
            let img = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = img
