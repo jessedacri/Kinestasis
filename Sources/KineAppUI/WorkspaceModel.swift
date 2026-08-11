@@ -261,6 +261,16 @@ public final class WorkspaceModel: ObservableObject {
     @Published public private(set) var previewVersion: Int = 0
 
     private let prober = MediaProber()
+    private let stillsIngest = StillsIngest()
+
+    /// Per-still preview strips for shot bin rows (capped, evenly sampled).
+    /// Not `@Published` — rows observe `previewVersion` like clip previews.
+    public private(set) var shotThumbnails: [ShotID: [CGImage]] = [:]
+    private var shotThumbsInFlight: Set<ShotID> = []
+    private static let shotThumbMax = 16
+
+    /// Non-nil while a shot batch export runs (0…1).
+    @Published public var shotExportProgress: Double? = nil
 
     private var autosaveTimer: Timer?
 
@@ -3515,10 +3525,8 @@ public final class WorkspaceModel: ObservableObject {
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
 
-        if isDir.boolValue {
-            if let children = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) {
-                for child in children { await ingestSingle(url: child) }
-            }
+        if isDir.boolValue || StillsIngest.stillExtensions.contains(url.pathExtension.lowercased()) {
+            await ingestStills(url: url)
             return
         }
 
@@ -3542,4 +3550,146 @@ public final class WorkspaceModel: ObservableObject {
         return ["mov", "mp4", "m4v", "wav", "aif", "aiff", "mp3"].contains(ext)
     }
 
+    // MARK: - Burst shots
+
+    /// Ingest a folder (or a loose still) into burst shots: EXIF probe →
+    /// gap grouping → shots in the pool. Videos found alongside go through
+    /// the normal clip path so they sit in the bin with the same look/feel.
+    private func ingestStills(url: URL) async {
+        let ingester = stillsIngest
+        let gap = project.settings.burst.gapThreshold
+        let (shots, videos) = await Task.detached(priority: .userInitiated) {
+            ingester.ingest(folder: url, gapThreshold: gap)
+        }.value
+
+        for shot in shots where !shot.frames.isEmpty {
+            project.mediaPool.shots[shot.id] = shot
+            project.mediaPool.rootBin.children.append(.shot(shot.id))
+            scheduleShotThumbnails(for: shot)
+        }
+        if !shots.isEmpty {
+            project.modifiedAt = Date()
+            markDirty()
+        }
+        for video in videos {
+            await ingestSingle(url: video)
+        }
+    }
+
+    public func removeShot(_ id: ShotID) {
+        project.mediaPool.shots[id] = nil
+        project.mediaPool.rootBin.children.removeAll {
+            if case .shot(let s) = $0 { return s == id }
+            return false
+        }
+        shotThumbnails[id] = nil
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func setShotTiming(_ mode: ShotTimingMode?, for id: ShotID) {
+        guard var shot = project.mediaPool.shots[id] else { return }
+        shot.timingOverride = mode
+        project.mediaPool.shots[id] = shot
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func setDefaultShotTiming(_ mode: ShotTimingMode) {
+        project.settings.burst.timing = mode
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func setBurstGapThreshold(_ seconds: TimeInterval) {
+        project.settings.burst.gapThreshold = seconds
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    /// The frame rate shot stats and exports use: the active sequence's
+    /// rate when one exists, else the project default.
+    public var shotFrameRate: FrameRate {
+        activeSequence?.settings.frameRate ?? project.settings.defaultFrameRate
+    }
+
+    public var orderedShots: [BurstShot] {
+        project.mediaPool.rootBin.children.compactMap {
+            if case .shot(let id) = $0 { return project.mediaPool.shots[id] }
+            return nil
+        }
+    }
+
+    // MARK: - Shot filmstrip thumbnails
+
+    public func scheduleShotThumbnails(for shot: BurstShot) {
+        guard shotThumbnails[shot.id] == nil, !shotThumbsInFlight.contains(shot.id) else { return }
+        shotThumbsInFlight.insert(shot.id)
+        let frames = shot.frames
+        let shotID = shot.id
+        Task.detached(priority: .utility) {
+            let count = min(Self.shotThumbMax, frames.count)
+            let urls: [URL] = (0..<count).map { i in
+                let idx = count == 1 ? 0
+                    : Int((Double(i) / Double(count - 1) * Double(frames.count - 1)).rounded())
+                return frames[idx].url
+            }
+            let images = urls.compactMap { StillDecoder.preview(url: $0, maxPixel: 200) }
+            await MainActor.run {
+                self.shotThumbnails[shotID] = images
+                self.shotThumbsInFlight.remove(shotID)
+                self.previewVersion += 1
+            }
+        }
+    }
+
+    // MARK: - Shot batch export
+
+    /// Batch-export shots to ProRes, one movie per shot, into a directory
+    /// the user picks. `ids` nil → every shot in bin order.
+    public func exportShots(_ ids: [ShotID]? = nil, codec: BurstShotExporter.Codec) {
+        let shots = ids.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? orderedShots
+        guard !shots.isEmpty, shotExportProgress == nil else { return }
+
+        let panel = NSOpenPanel()
+        panel.title = "Choose Export Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Export \(shots.count) Shot\(shots.count == 1 ? "" : "s")"
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+
+        let defaults = project.settings.burst.timing
+        let rate = shotFrameRate
+        let exporter = BurstShotExporter()
+        shotExportProgress = 0
+
+        Task.detached(priority: .userInitiated) {
+            var failures: [String] = []
+            for (i, shot) in shots.enumerated() {
+                do {
+                    try exporter.export(
+                        shot: shot,
+                        mode: shot.timing(projectDefault: defaults),
+                        rate: rate,
+                        codec: codec,
+                        to: directory
+                    )
+                } catch {
+                    failures.append("\(shot.name): \(error.localizedDescription)")
+                }
+                let fraction = Double(i + 1) / Double(shots.count)
+                await MainActor.run { self.shotExportProgress = fraction }
+            }
+            await MainActor.run {
+                self.shotExportProgress = nil
+                if !failures.isEmpty {
+                    let alert = NSAlert()
+                    alert.messageText = "Some shots failed to export"
+                    alert.informativeText = failures.joined(separator: "\n")
+                    alert.runModal()
+                }
+            }
+        }
+    }
 }

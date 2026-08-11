@@ -31,6 +31,7 @@ struct BinBrowserView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 sequencesSection
+                shotsSection
                 switch workspace.binFilter {
                 case .all:       clipsSection
                 case .favorites: favoritesSection
@@ -39,6 +40,98 @@ struct BinBrowserView: View {
             .padding(.vertical, 4)
         }
         .overlay(emptyState)
+    }
+
+    @ViewBuilder private var shotsSection: some View {
+        let shots = workspace.orderedShots
+        if !shots.isEmpty {
+            HStack {
+                Text("SHOTS")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("\(shots.count)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if let progress = workspace.shotExportProgress {
+                    ProgressView(value: progress).controlSize(.small).frame(width: 70)
+                } else {
+                    shotDefaultTimingMenu
+                    shotExportMenu
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+            ForEach(shots) { shot in
+                BurstShotRow(workspace: workspace, shot: shot)
+            }
+        }
+    }
+
+    /// Burst ingest settings: the capture-gap threshold that splits shots
+    /// (applies to subsequent folder drops) and the default timing mode.
+    private var burstSettingsMenu: some View {
+        Menu {
+            Section("Split shots on gaps over") {
+                ForEach([0.5, 1.0, 2.0, 3.0, 5.0, 10.0], id: \.self) { gap in
+                    Button {
+                        workspace.setBurstGapThreshold(gap)
+                    } label: {
+                        let label = String(format: gap < 1 ? "%.1f s" : "%.0f s", gap)
+                        if workspace.project.settings.burst.gapThreshold == gap {
+                            Label(label, systemImage: "checkmark")
+                        } else {
+                            Text(label)
+                        }
+                    }
+                }
+            }
+            Section("Default timing") {
+                TimingModePicker(
+                    current: workspace.project.settings.burst.timing,
+                    allowDefault: false
+                ) { mode in
+                    if let mode { workspace.setDefaultShotTiming(mode) }
+                }
+            }
+        } label: {
+            Image(systemName: "camera.aperture")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Burst grouping & timing defaults")
+    }
+
+    private var shotDefaultTimingMenu: some View {
+        Menu {
+            TimingModePicker(
+                current: workspace.project.settings.burst.timing,
+                allowDefault: false
+            ) { mode in
+                if let mode { workspace.setDefaultShotTiming(mode) }
+            }
+        } label: {
+            Text(timingModeLabel(workspace.project.settings.burst.timing))
+                .font(.system(size: 10))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    private var shotExportMenu: some View {
+        Menu {
+            Button("ProRes 422 HQ…") { workspace.exportShots(codec: .proRes422HQ) }
+            Button("ProRes 4444…") { workspace.exportShots(codec: .proRes4444) }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(.system(size: 10))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Batch-export all shots")
     }
 
     @ViewBuilder private var sequencesSection: some View {
@@ -99,6 +192,7 @@ struct BinBrowserView: View {
             Text("Master")
                 .font(.system(size: 13, weight: .semibold))
             Spacer()
+            burstSettingsMenu
             filterToggle
             if workspace.importing {
                 ProgressView().controlSize(.small)
@@ -181,6 +275,227 @@ struct BinBrowserView: View {
             workspace.ingest(urls: urls)
         }
         return true
+    }
+}
+
+// MARK: - Burst shot row
+
+/// A burst shot in the bin: skimmable per-still filmstrip, live timing
+/// stats, and a context menu for the per-clip timing override.
+private struct BurstShotRow: View {
+    @ObservedObject var workspace: WorkspaceModel
+    let shot: BurstShot
+
+    private var mode: ShotTimingMode { shot.timing(projectDefault: workspace.project.settings.burst.timing) }
+    private var rate: FrameRate { workspace.shotFrameRate }
+    private var aspect: CGFloat {
+        if let s = shot.frames.first?.pixelSize, s.height > 0 {
+            return CGFloat(s.width) / CGFloat(s.height)
+        }
+        return 3.0 / 2.0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            stripArea
+            metadataLine
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .onAppear { workspace.scheduleShotThumbnails(for: shot) }
+        .contextMenu {
+            Menu("Timing") {
+                TimingModePicker(current: shot.timingOverride, allowDefault: true) { mode in
+                    workspace.setShotTiming(mode, for: shot.id)
+                }
+            }
+            Menu("Export Shot") {
+                Button("ProRes 422 HQ…") { workspace.exportShots([shot.id], codec: .proRes422HQ) }
+                Button("ProRes 4444…") { workspace.exportShots([shot.id], codec: .proRes4444) }
+            }
+            Divider()
+            Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
+        }
+    }
+
+    private var stripArea: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                stripContent
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+                nameOverlay
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(Color.black.opacity(0.4), lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .frame(height: 50)
+    }
+
+    @ViewBuilder private var stripContent: some View {
+        // previewVersion (via workspace's objectWillChange) refreshes this
+        // once the async thumb decode lands.
+        let _ = workspace.previewVersion
+        let images = workspace.shotThumbnails[shot.id] ?? []
+        if images.isEmpty {
+            Rectangle().fill(Color.black.opacity(0.35))
+                .overlay(ProgressView().controlSize(.small))
+        } else {
+            ShotFilmstrip(images: images, aspect: aspect)
+        }
+    }
+
+    private var nameOverlay: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 5) {
+                Image(systemName: "square.stack.3d.down.forward")
+                    .font(.system(size: 9))
+                    .foregroundStyle(KineTheme.accent)
+                Text(shot.name)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                if shot.timingOverride != nil {
+                    Text(timingModeLabel(mode))
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(KineTheme.accent.opacity(0.85))
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                }
+                Spacer(minLength: 0)
+                Text("\(shot.frames.count)")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                LinearGradient(colors: [.black.opacity(0.0), .black.opacity(0.65)],
+                               startPoint: .top, endPoint: .bottom)
+            )
+            .foregroundStyle(.white)
+        }
+    }
+
+    /// Live stats: recomputed whenever the timing mode, override, or
+    /// project frame rate changes (all flow through `workspace.project`).
+    private var metadataLine: some View {
+        let schedule = ShotTimingEngine.schedule(frames: shot.frames, mode: mode, rate: rate)
+        let outFrames = ShotTimingEngine.totalFrames(schedule)
+        let outSeconds = Double(outFrames) / rate.fps
+        var bits: [String] = []
+        bits.append("\(shot.frames.count) stills")
+        if shot.captureSpan > 0 {
+            bits.append(String(format: "shot over %.1fs", shot.captureSpan))
+        }
+        bits.append(String(format: "%.1fs @ %@", outSeconds, rate.rawValue))
+        bits.append(timingModeLabel(mode) + (shot.timingOverride == nil ? " (default)" : ""))
+        return Text(bits.joined(separator: " · "))
+            .font(KineTheme.monoSmall)
+            .foregroundStyle(KineTheme.textMuted)
+            .lineLimit(1)
+            .padding(.horizontal, 2)
+    }
+}
+
+/// Tiles a shot's sampled stills edge-to-edge (one cell per thumb, aspect
+/// preserved, trailing cell clipped).
+private struct ShotFilmstrip: View {
+    let images: [CGImage]
+    let aspect: CGFloat
+
+    var body: some View {
+        Canvas { ctx, size in
+            guard !images.isEmpty, size.width > 0, size.height > 0 else { return }
+            let h = size.height
+            let cellW = max(8, h * aspect)
+            let n = max(1, Int(ceil(size.width / cellW)))
+            for i in 0..<n {
+                let frac = n == 1 ? 0.5 : Double(i) / Double(n - 1)
+                let idx = min(images.count - 1, max(0, Int((frac * Double(images.count - 1)).rounded())))
+                let rect = CGRect(x: CGFloat(i) * cellW, y: 0, width: cellW, height: h)
+                ctx.draw(Image(decorative: images[idx], scale: 1), in: rect)
+            }
+        }
+        .background(Color.black)
+    }
+}
+
+// MARK: - Timing mode picker + labels
+
+/// Shared menu body for choosing a `ShotTimingMode`. `allowDefault` adds a
+/// "Use Project Default" item that reports nil (clearing an override).
+private struct TimingModePicker: View {
+    let current: ShotTimingMode?
+    let allowDefault: Bool
+    let onPick: (ShotTimingMode?) -> Void
+
+    init(current: ShotTimingMode?, allowDefault: Bool, onPick: @escaping (ShotTimingMode?) -> Void) {
+        self.current = current
+        self.allowDefault = allowDefault
+        self.onPick = onPick
+    }
+
+    var body: some View {
+        if allowDefault {
+            item(label: "Use Project Default", mode: nil, checked: current == nil)
+            Divider()
+        }
+        Section("Fixed") {
+            ForEach([1, 2, 3, 4, 6, 8, 12], id: \.self) { f in
+                item(label: "\(f) frame\(f == 1 ? "" : "s") / still",
+                     mode: .fixedFramesPerStill(frames: f),
+                     checked: current == .fixedFramesPerStill(frames: f))
+            }
+        }
+        Section("As Shot") {
+            item(label: "Real time", mode: .asShot(rate: 1.0), checked: current == .asShot(rate: 1.0))
+            item(label: "Half speed", mode: .asShot(rate: 0.5), checked: current == .asShot(rate: 0.5))
+            item(label: "Double speed", mode: .asShot(rate: 2.0), checked: current == .asShot(rate: 2.0))
+        }
+        Section("Frame Skip") {
+            ForEach([2, 3, 4], id: \.self) { n in
+                item(label: "Every \(ordinal(n)) still · 3 frames",
+                     mode: .frameSkip(every: n, frames: 3),
+                     checked: current == .frameSkip(every: n, frames: 3))
+            }
+        }
+    }
+
+    @ViewBuilder private func item(label: String, mode: ShotTimingMode?, checked: Bool) -> some View {
+        Button {
+            onPick(mode)
+        } label: {
+            if checked {
+                Label(label, systemImage: "checkmark")
+            } else {
+                Text(label)
+            }
+        }
+    }
+
+    private func ordinal(_ n: Int) -> String {
+        switch n {
+        case 2: return "2nd"
+        case 3: return "3rd"
+        default: return "\(n)th"
+        }
+    }
+}
+
+func timingModeLabel(_ mode: ShotTimingMode) -> String {
+    switch mode {
+    case .fixedFramesPerStill(let f):
+        return "\(f)f/still"
+    case .asShot(let r):
+        return r == 1.0 ? "as shot" : String(format: "as shot %g×", r)
+    case .frameSkip(let n, let f):
+        return "skip \(n) · \(f)f"
     }
 }
 
