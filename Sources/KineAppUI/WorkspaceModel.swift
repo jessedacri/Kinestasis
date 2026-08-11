@@ -272,6 +272,16 @@ public final class WorkspaceModel: ObservableObject {
     /// Non-nil while a shot batch export runs (0…1).
     @Published public var shotExportProgress: Double? = nil
 
+    /// Top-level workspace mode. `.shots` is the app's home: import,
+    /// group, time, grade, batch-export. `.assemble` is the inherited
+    /// timeline layout for ordering/trimming and exporting one cut.
+    @Published public var appMode: AppMode = .shots
+
+    public enum AppMode: String, CaseIterable, Sendable {
+        case shots = "Shots"
+        case assemble = "Assemble"
+    }
+
     private var autosaveTimer: Timer?
 
     /// Weak handle for the AppDelegate to inspect lifecycle state
@@ -3607,6 +3617,12 @@ public final class WorkspaceModel: ObservableObject {
         markDirty()
     }
 
+    public func setProjectFrameRate(_ rate: FrameRate) {
+        project.settings.defaultFrameRate = rate
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
     // MARK: - Shot grading
 
     /// Shot targeted by the Shot grade tab (set by clicking a bin row).
@@ -3620,8 +3636,12 @@ public final class WorkspaceModel: ObservableObject {
 
     public func selectShot(_ id: ShotID) {
         selectedShotID = id
-        sourcePaneTab = .shotGrade
-        focusedViewer = .source
+        // In Assemble mode the shot inspector lives in the Source pane's
+        // Shot tab; the Shots workspace has its own inspector split.
+        if appMode == .assemble {
+            sourcePaneTab = .shotGrade
+            focusedViewer = .source
+        }
     }
 
     public func setShotGrade(_ grade: ShotGrade, for id: ShotID) {
@@ -3739,22 +3759,39 @@ public final class WorkspaceModel: ObservableObject {
         let exporter = BurstShotExporter()
         shotExportProgress = 0
 
+        let batchName = directory.lastPathComponent
         Task.detached(priority: .userInitiated) {
             var failures: [String] = []
+            var sidecarEntries: [ShotBatchXMLSidecar.Entry] = []
             for (i, shot) in shots.enumerated() {
                 do {
-                    try exporter.export(
+                    let movieURL = try exporter.export(
                         shot: shot,
                         mode: shot.timing(projectDefault: defaults),
                         rate: rate,
                         codec: codec,
                         to: directory
                     )
+                    let schedule = ShotTimingEngine.schedule(for: shot, projectDefault: defaults, rate: rate)
+                    let size = shot.frames.first?.pixelSize ?? PixelSize(width: 1920, height: 1080)
+                    sidecarEntries.append(ShotBatchXMLSidecar.Entry(
+                        shot: shot, movieURL: movieURL,
+                        outputFrames: ShotTimingEngine.totalFrames(schedule),
+                        size: PixelSize(width: size.width - size.width % 2, height: size.height - size.height % 2)
+                    ))
                 } catch {
                     failures.append("\(shot.name): \(error.localizedDescription)")
                 }
                 let fraction = Double(i + 1) / Double(shots.count)
                 await MainActor.run { self.shotExportProgress = fraction }
+            }
+            if !sidecarEntries.isEmpty {
+                do {
+                    _ = try ShotBatchXMLSidecar().write(
+                        entries: sidecarEntries, rate: rate, to: directory, batchName: batchName)
+                } catch {
+                    failures.append("XML sidecar: \(error.localizedDescription)")
+                }
             }
             await MainActor.run {
                 self.shotExportProgress = nil

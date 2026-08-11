@@ -86,12 +86,39 @@ public struct KineRootView: View {
         )
     }
 
+    /// Mode strip: the Kinestasis flow first (Shots), the inherited
+    /// timeline second (Assemble).
+    private var modeBar: some View {
+        HStack(spacing: 0) {
+            ForEach(WorkspaceModel.AppMode.allCases, id: \.self) { mode in
+                let active = workspace.appMode == mode
+                Text(mode.rawValue)
+                    .font(.system(size: 11, weight: active ? .semibold : .regular))
+                    .foregroundStyle(active ? Color.white : Color.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 4)
+                    .background(active ? KineTheme.accent : Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture { workspace.appMode = mode }
+            }
+            Spacer()
+        }
+        .background(KineTheme.bgPanel)
+    }
+
     private var content: some View {
         Group {
             if workspace.programFullscreen {
                 ProgramViewer(workspace: workspace)
             } else {
-                splitLayout
+                VStack(spacing: 0) {
+                    modeBar
+                    Divider()
+                    switch workspace.appMode {
+                    case .shots:    ShotsWorkspaceView(workspace: workspace)
+                    case .assemble: splitLayout
+                    }
+                }
             }
         }
         .frame(minWidth: 1200, minHeight: 800)

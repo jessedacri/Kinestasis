@@ -23,6 +23,8 @@ struct ShotGradePanel: View {
                 Divider()
                 ThinScrollView(axis: .vertical) {
                     VStack(alignment: .leading, spacing: 10) {
+                        timingSection(shot)
+                        Divider()
                         controls(shot)
                         Divider()
                         lutSection(shot)
@@ -102,6 +104,36 @@ struct ShotGradePanel: View {
             await MainActor.run {
                 if generation == self.renderGeneration { self.preview = image }
             }
+        }
+    }
+
+    // MARK: - Timing
+
+    private func timingSection(_ shot: BurstShot) -> some View {
+        let projectDefault = workspace.project.settings.burst.timing
+        let mode = shot.timing(projectDefault: projectDefault)
+        let rate = workspace.shotFrameRate
+        let schedule = ShotTimingEngine.schedule(for: shot, projectDefault: projectDefault, rate: rate)
+        let seconds = Double(ShotTimingEngine.totalFrames(schedule)) / rate.fps
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("TIMING").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            HStack {
+                Menu {
+                    TimingModePicker(current: shot.timingOverride, allowDefault: true) { picked in
+                        workspace.setShotTiming(picked, for: shot.id)
+                    }
+                } label: {
+                    Label(timingModeLabel(mode) + (shot.timingOverride == nil ? "  (project default)" : ""),
+                          systemImage: "timer")
+                        .font(.system(size: 11))
+                }
+                .fixedSize()
+                Spacer()
+            }
+            Text(String(format: "%d stills · shot over %.1fs · plays %.1fs @ %@",
+                        shot.frames.count, shot.captureSpan, seconds, rate.rawValue))
+                .font(KineTheme.monoSmall)
+                .foregroundStyle(KineTheme.textMuted)
         }
     }
 

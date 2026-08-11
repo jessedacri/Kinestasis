@@ -412,7 +412,7 @@ private struct BurstShotRow: View {
 
 /// Tiles a shot's sampled stills edge-to-edge (one cell per thumb, aspect
 /// preserved, trailing cell clipped).
-private struct ShotFilmstrip: View {
+struct ShotFilmstrip: View {
     let images: [CGImage]
     let aspect: CGFloat
 
@@ -437,7 +437,7 @@ private struct ShotFilmstrip: View {
 
 /// Shared menu body for choosing a `ShotTimingMode`. `allowDefault` adds a
 /// "Use Project Default" item that reports nil (clearing an override).
-private struct TimingModePicker: View {
+struct TimingModePicker: View {
     let current: ShotTimingMode?
     let allowDefault: Bool
     let onPick: (ShotTimingMode?) -> Void
