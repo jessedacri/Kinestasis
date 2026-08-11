@@ -13,6 +13,7 @@ struct ShotExportSheet: View {
     @State private var codec: BurstShotExporter.Codec = .proRes422HQ
     @State private var resolutionChoice: ResolutionChoice = .native
     @State private var writeSidecar = false
+    @State private var bitrateMbps: Int = 50
 
     private enum ResolutionChoice: String, CaseIterable {
         case native = "Native"
@@ -61,13 +62,43 @@ struct ShotExportSheet: View {
             }
 
             row("Codec") {
-                Picker("", selection: $codec) {
-                    Text("ProRes 422 HQ").tag(BurstShotExporter.Codec.proRes422HQ)
-                    Text("ProRes 4444").tag(BurstShotExporter.Codec.proRes4444)
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("", selection: $codec) {
+                        ForEach(BurstShotExporter.Codec.allCases, id: \.self) { c in
+                            Text(c.displayName).tag(c)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .onChange(of: codec) { _, newCodec in
+                        if newCodec.usesBitrate { bitrateMbps = newCodec.defaultBitrateMbps }
+                    }
+                    if codec.usesBitrate {
+                        HStack(spacing: 6) {
+                            Text("Bitrate")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            ThinSlider(
+                                value: Binding(
+                                    get: { Double(bitrateMbps) },
+                                    set: { bitrateMbps = Int($0.rounded()) }
+                                ),
+                                range: 5...200
+                            )
+                            .frame(width: 140)
+                            Text("\(bitrateMbps) Mbps")
+                                .font(KineTheme.monoSmall)
+                                .foregroundStyle(KineTheme.textMuted)
+                                .frame(width: 62, alignment: .trailing)
+                        }
+                    }
+                    if codec == .h264, capExceedsH264 {
+                        Text("H.264 tops out at a 3840 long edge; output is capped there.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
             }
 
             row("Resolution") {
@@ -82,6 +113,12 @@ struct ShotExportSheet: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                 }
+            }
+
+            row("Size") {
+                Text(sizeEstimate)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
             row("Handoff") {
@@ -121,6 +158,50 @@ struct ShotExportSheet: View {
         .padding(.vertical, 6)
     }
 
+    private var capExceedsH264: Bool {
+        guard let size = shots.first?.effectiveFrames.first?.pixelSize else { return false }
+        let edge = resolutionChoice.longEdge ?? max(size.width, size.height)
+        return edge > 3840
+    }
+
+    /// Whole-batch size estimate for the selected codec and resolution.
+    /// H.264/HEVC follow the bitrate directly; ProRes scales Apple's
+    /// 1080p24 target rates by pixel rate.
+    private var sizeEstimate: String {
+        let rate = workspace.shotFrameRate
+        var totalSeconds = 0.0
+        for shot in shots {
+            totalSeconds += Double(ShotTimingEngine.totalFrames(workspace.schedule(for: shot))) / rate.fps
+        }
+        guard totalSeconds > 0 else { return "No shots selected" }
+
+        let native = shots.first?.effectiveFrames.first?.pixelSize ?? PixelSize(width: 1920, height: 1080)
+        var edge = resolutionChoice.longEdge ?? max(native.width, native.height)
+        if let limit = codec.longEdgeLimit { edge = min(edge, limit) }
+        let scale = Double(edge) / Double(max(native.width, native.height))
+        let w = min(1, scale) * Double(native.width)
+        let h = min(1, scale) * Double(native.height)
+
+        let mbps: Double
+        if codec.usesBitrate {
+            mbps = Double(bitrateMbps)
+        } else {
+            let referenceMbps: Double
+            switch codec {
+            case .proRes422:   referenceMbps = 117
+            case .proRes422HQ: referenceMbps = 176
+            case .proRes4444:  referenceMbps = 264
+            default:           referenceMbps = 176
+            }
+            let pixelRate = (w * h * rate.fps) / (1920.0 * 1080.0 * 24.0)
+            mbps = referenceMbps * pixelRate
+        }
+        let bytes = Int64(mbps * 1_000_000 / 8 * totalSeconds)
+        let formatted = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        let clips = shots.count == 1 ? "1 clip" : "\(shots.count) clips"
+        return String(format: "About %@ for %@ (%.0f seconds total)", formatted, clips, totalSeconds)
+    }
+
     private func chooseDestination() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -134,7 +215,9 @@ struct ShotExportSheet: View {
         guard let destination else { return }
         workspace.showingShotExportSheet = false
         workspace.exportShots(workspace.shotExportTarget, codec: codec, to: destination,
-                              longEdge: resolutionChoice.longEdge, writeSidecar: writeSidecar)
+                              longEdge: resolutionChoice.longEdge,
+                              bitrateMbps: codec.usesBitrate ? bitrateMbps : nil,
+                              writeSidecar: writeSidecar)
     }
 }
 

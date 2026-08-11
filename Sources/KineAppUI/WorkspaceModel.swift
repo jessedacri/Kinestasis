@@ -4217,7 +4217,8 @@ public final class WorkspaceModel: ObservableObject {
     /// export sheet: destination, codec, optional long-edge cap, optional
     /// FCPXML sidecar.
     public func exportShots(_ ids: [ShotID]?, codec: BurstShotExporter.Codec,
-                            to directory: URL, longEdge: Int? = nil, writeSidecar: Bool = false) {
+                            to directory: URL, longEdge: Int? = nil, bitrateMbps: Int? = nil,
+                            writeSidecar: Bool = false) {
         let shots = ids.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? exportableShots
         guard !shots.isEmpty, shotExportProgress == nil else { return }
 
@@ -4243,6 +4244,7 @@ public final class WorkspaceModel: ObservableObject {
                         codec: codec,
                         to: directory,
                         maxLongEdge: longEdge,
+                        bitrateMbps: bitrateMbps,
                         isCancelled: { cancel.isCancelled }
                     )
                     if cancel.isCancelled { break }

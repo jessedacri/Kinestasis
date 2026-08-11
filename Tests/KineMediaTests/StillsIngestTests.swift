@@ -153,4 +153,22 @@ final class StillsIngestTests: XCTestCase {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f.date(from: s)!.timeIntervalSince1970
     }
+
+    func testCompressedCodecExportsWriteValidMovies() throws {
+        for i in 0..<4 {
+            _ = try writeJPEG(name: String(format: "c%02d.jpg", i),
+                              dateTime: "2026:08:10 12:00:00",
+                              subsec: String(format: "%02d", i * 20))
+        }
+        let shots = StillsIngest().ingest(folder: dir, gapThreshold: 2.0).shots
+        let out = dir.appendingPathComponent("out", isDirectory: true)
+        for codec in [BurstShotExporter.Codec.h264, .hevc, .proRes422] {
+            let url = try BurstShotExporter().export(
+                shot: shots[0], mode: .fixedFramesPerStill(frames: 6),
+                rate: .twentyFour, codec: codec, to: out, bitrateMbps: 20)
+            let asset = AVURLAsset(url: url)
+            XCTAssertEqual(CMTimeGetSeconds(asset.duration), 1.0, accuracy: 0.05, codec.rawValue)
+            XCTAssertFalse(asset.tracks(withMediaType: .video).isEmpty, codec.rawValue)
+        }
+    }
 }

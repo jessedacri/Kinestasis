@@ -9,21 +9,72 @@ import KineCore
 public struct BurstShotExporter: Sendable {
 
     public enum Codec: String, CaseIterable, Sendable {
+        case proRes422
         case proRes422HQ
         case proRes4444
+        case h264
+        case hevc
 
         var avCodec: AVVideoCodecType {
             switch self {
+            case .proRes422:   return .proRes422
             case .proRes422HQ: return .proRes422HQ
             case .proRes4444:  return .proRes4444
+            case .h264:        return .h264
+            case .hevc:        return .hevc
             }
         }
 
         public var fileSuffix: String {
             switch self {
+            case .proRes422:   return "422"
             case .proRes422HQ: return "422HQ"
             case .proRes4444:  return "4444"
+            case .h264:        return "H264"
+            case .hevc:        return "HEVC"
             }
+        }
+
+        public var displayName: String {
+            switch self {
+            case .proRes422:   return "ProRes 422"
+            case .proRes422HQ: return "ProRes 422 HQ"
+            case .proRes4444:  return "ProRes 4444"
+            case .h264:        return "H.264"
+            case .hevc:        return "HEVC"
+            }
+        }
+
+        public var usesBitrate: Bool { self == .h264 || self == .hevc }
+        public var defaultBitrateMbps: Int { self == .h264 ? 50 : 30 }
+
+        /// Hardware encoder dimension ceiling; native 24 MP stills exceed
+        /// what H.264 levels allow.
+        public var longEdgeLimit: Int? {
+            switch self {
+            case .h264: return 3840
+            case .hevc: return 8192
+            default: return nil
+            }
+        }
+
+        func videoSettings(width: Int, height: Int, bitrateMbps: Int?) -> [String: Any] {
+            var settings: [String: Any] = [
+                AVVideoCodecKey: avCodec,
+                AVVideoWidthKey: width,
+                AVVideoHeightKey: height,
+            ]
+            if usesBitrate {
+                var compression: [String: Any] = [
+                    AVVideoAverageBitRateKey: (bitrateMbps ?? defaultBitrateMbps) * 1_000_000,
+                    AVVideoMaxKeyFrameIntervalKey: 48,
+                ]
+                if self == .h264 {
+                    compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+                }
+                settings[AVVideoCompressionPropertiesKey] = compression
+            }
+            return settings
         }
     }
 
@@ -61,10 +112,10 @@ public struct BurstShotExporter: Sendable {
         to directory: URL,
         filename: String? = nil,
         maxLongEdge: Int? = nil,
+        bitrateMbps: Int? = nil,
         isCancelled: @Sendable () -> Bool = { false },
         progress: @Sendable (Double) -> Void = { _ in }
     ) throws -> URL {
-        let gradeRenderer = shot.grade.isIdentity ? nil : ShotGradeRenderer()
         let frames = shot.effectiveFrames
         let schedule = ShotTimingEngine.applyRamp(
             ShotTimingEngine.schedule(frames: frames, mode: mode, rate: rate),
@@ -81,9 +132,15 @@ public struct BurstShotExporter: Sendable {
         } else {
             throw ExportError.stillDecodeFailed(frames[0].url)
         }
-        // Optional long-edge cap from the export sheet (nil = native).
+        // Optional long-edge cap from the export sheet (nil = native),
+        // tightened to the codec's hardware ceiling (H.264 tops out well
+        // below 24 MP stills).
+        var effectiveCap = maxLongEdge
+        if let limit = codec.longEdgeLimit {
+            effectiveCap = min(effectiveCap ?? limit, limit)
+        }
         let outputSize: PixelSize
-        if let cap = maxLongEdge, cap < max(nativeSize.width, nativeSize.height) {
+        if let cap = effectiveCap, cap < max(nativeSize.width, nativeSize.height) {
             let scale = Double(cap) / Double(max(nativeSize.width, nativeSize.height))
             outputSize = PixelSize(width: Int(Double(nativeSize.width) * scale),
                                    height: Int(Double(nativeSize.height) * scale))
@@ -105,11 +162,8 @@ public struct BurstShotExporter: Sendable {
             throw ExportError.writerFailed(error.localizedDescription)
         }
 
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: codec.avCodec,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-        ])
+        let input = AVAssetWriterInput(mediaType: .video,
+            outputSettings: codec.videoSettings(width: width, height: height, bitrateMbps: bitrateMbps))
         input.expectsMediaDataInRealTime = false
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: input,
@@ -128,44 +182,116 @@ public struct BurstShotExporter: Sendable {
 
         let timescale = CMTimeScale(rate.rationalRate)
         let frameTicks = Int64(rate.rationalScale)
+        let maxEdge = max(width, height)
 
-        for (i, event) in schedule.enumerated() {
+        // ── Sample plan ─────────────────────────────────────────────
+        // Static texture: one sample per schedule event (a still held for
+        // k frames is one appended frame with a k-frame duration). Grain
+        // or wobble animate per output frame, so those shots emit one
+        // sample per frame with the texture re-applied on top of a
+        // once-developed base (matches timeline playback exactly).
+        struct Sample { let stillIndex: Int; let outputFrame: Int64 }
+        let animatedTexture = shot.grade.grainAmount > 0 || shot.grade.wobbleIntensity > 0
+        var samples: [Sample] = []
+        if animatedTexture {
+            for event in schedule {
+                for f in 0..<event.frameCount {
+                    samples.append(Sample(stillIndex: event.frameIndex, outputFrame: event.startFrame + f))
+                }
+            }
+        } else {
+            samples = schedule.map { Sample(stillIndex: $0.frameIndex, outputFrame: $0.startFrame) }
+        }
+
+        // ── Parallel develop, ordered append ────────────────────────
+        // Decode/develop dominates export time and each still is
+        // independent, so windows of samples develop concurrently across
+        // cores while appends stay strictly ordered. The hardware ProRes /
+        // H.264 / HEVC encoder then stays fed instead of starving behind a
+        // single-core decode loop.
+        var developGrade = shot.grade
+        developGrade.grainAmount = 0
+        let renderer = ShotGradeRenderer()
+        let baseLock = NSLock()
+        var baseCache: [Int: CGImage] = [:]
+        let window = max(4, min(12, ProcessInfo.processInfo.activeProcessorCount))
+        var appended = 0
+
+        func developBase(_ stillIndex: Int) -> CGImage? {
+            baseLock.lock()
+            if let hit = baseCache[stillIndex] { baseLock.unlock(); return hit }
+            baseLock.unlock()
+            let url = shot.sourceURL(for: frames[stillIndex])
+            let image = renderer.render(url: url, grade: developGrade, maxPixel: maxEdge)
+                ?? StillDecoder.decode(url: url, maxPixel: maxEdge)
+            if let image {
+                baseLock.lock()
+                baseCache[stillIndex] = image
+                // Stills are consumed in order; keep only a small tail.
+                if baseCache.count > window * 2 {
+                    let minLive = stillIndex - window * 2
+                    baseCache = baseCache.filter { $0.key >= minLive }
+                }
+                baseLock.unlock()
+            }
+            return image
+        }
+
+        func produce(_ sample: Sample) -> CVPixelBuffer? {
+            guard var image = developBase(sample.stillIndex) else { return nil }
+            if animatedTexture {
+                let ev = ExposureWobble.evOffset(outputFrame: sample.outputFrame, fps: rate.fps,
+                                                 intensity: shot.grade.wobbleIntensity,
+                                                 rate: shot.grade.wobbleRate)
+                var texture = ShotGrade()
+                texture.grainAmount = shot.grade.grainAmount
+                texture.grainSize = shot.grade.grainSize
+                texture.grainResponse = shot.grade.grainResponse
+                image = renderer.gradePreview(image, grade: texture, evOffset: ev, grainSeed: sample.outputFrame) ?? image
+            }
+            guard let pool = adaptor.pixelBufferPool else { return nil }
+            return Self.render(image: image, width: width, height: height, pool: pool)
+        }
+
+        var index = 0
+        while index < samples.count {
             if isCancelled() {
                 input.markAsFinished()
                 writer.cancelWriting()
                 try? FileManager.default.removeItem(at: outputURL)
                 return outputURL
             }
-            let stillURL = shot.sourceURL(for: frames[event.frameIndex])
-            let maxEdge = max(width, height)
-            let ev = ExposureWobble.evOffset(
-                outputFrame: event.startFrame, fps: rate.fps,
-                intensity: shot.grade.wobbleIntensity, rate: shot.grade.wobbleRate)
-            let decoded = gradeRenderer?.render(url: stillURL, grade: shot.grade, maxPixel: maxEdge,
-                                                evOffset: ev, grainSeed: event.startFrame)
-                ?? StillDecoder.decode(url: stillURL, maxPixel: maxEdge)
-            guard let image = decoded else {
-                input.markAsFinished()
-                writer.cancelWriting()
-                throw ExportError.stillDecodeFailed(stillURL)
+            let upper = min(index + window, samples.count)
+            let windowSamples = Array(samples[index..<upper])
+            var buffers = [CVPixelBuffer?](repeating: nil, count: windowSamples.count)
+            buffers.withUnsafeMutableBufferPointer { out in
+                let base = out.baseAddress!
+                let resultLock = NSLock()
+                DispatchQueue.concurrentPerform(iterations: windowSamples.count) { i in
+                    let buffer = produce(windowSamples[i])
+                    resultLock.lock(); base[i] = buffer; resultLock.unlock()
+                }
             }
-            guard let pool = adaptor.pixelBufferPool,
-                  let buffer = Self.render(image: image, width: width, height: height, pool: pool) else {
-                input.markAsFinished()
-                writer.cancelWriting()
-                throw ExportError.pixelBufferAllocFailed
+            for (i, sample) in windowSamples.enumerated() {
+                guard let buffer = buffers[i] else {
+                    input.markAsFinished()
+                    writer.cancelWriting()
+                    throw ExportError.stillDecodeFailed(shot.sourceURL(for: frames[sample.stillIndex]))
+                }
+                while !input.isReadyForMoreMediaData {
+                    Thread.sleep(forTimeInterval: 0.002)
+                }
+                let pts = CMTime(value: sample.outputFrame * frameTicks, timescale: timescale)
+                guard adaptor.append(buffer, withPresentationTime: pts) else {
+                    let reason = writer.error?.localizedDescription ?? "append failed"
+                    input.markAsFinished()
+                    writer.cancelWriting()
+                    throw ExportError.writerFailed(reason)
+                }
+                appended += 1
+                progress(Double(appended) / Double(samples.count))
             }
-            while !input.isReadyForMoreMediaData {
-                Thread.sleep(forTimeInterval: 0.005)
-            }
-            let pts = CMTime(value: event.startFrame * frameTicks, timescale: timescale)
-            guard adaptor.append(buffer, withPresentationTime: pts) else {
-                let reason = writer.error?.localizedDescription ?? "append failed"
-                input.markAsFinished()
-                writer.cancelWriting()
-                throw ExportError.writerFailed(reason)
-            }
-            progress(Double(i + 1) / Double(schedule.count))
+            index = upper
         }
 
         // End the session at the schedule's end boundary so the last still

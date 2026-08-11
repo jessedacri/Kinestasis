@@ -90,4 +90,27 @@ final class RealFootageTests: XCTestCase {
         let size = asset.tracks(withMediaType: .video).first?.naturalSize ?? .zero
         XCTAssertGreaterThanOrEqual(Int(size.width), 4000, "native-res export from real RAF/JPG")
     }
+
+    /// Throughput probe for the parallel export pipeline: biggest burst on
+    /// the card, native-res RAF develop, animated grain (per-frame
+    /// samples). Prints wall time + effective fps.
+    func testExportThroughputOnLargestShot() throws {
+        try requireFootage()
+        let card = Self.root.appendingPathComponent("C1/DCIM/176_FUJI")
+        let result = StillsIngest().ingest(folder: card, gapThreshold: 2.0, minBurstCount: 3)
+        guard var shot = result.shots.max(by: { $0.frames.count < $1.frames.count }) else {
+            XCTFail("no shots"); return
+        }
+        shot.timingOverride = .fixedFramesPerStill(frames: 3)
+        shot.grade = ShotGrade(exposure: 0.3, contrast: 12, grainAmount: 30, wobbleIntensity: 25)
+        let outDir = URL(fileURLWithPath: "/private/tmp/claude-501/-Users-jessedacri-Preem/f043db8e-68dd-4668-b674-bc449c66ad51/scratchpad/perf-export", isDirectory: true)
+        let start = Date()
+        let url = try BurstShotExporter().export(shot: shot, mode: shot.timing(projectDefault: .default),
+                                                 rate: .twentyFour, codec: .proRes422HQ, to: outDir)
+        let wall = Date().timeIntervalSince(start)
+        let outFrames = ShotTimingEngine.totalFrames(ShotTimingEngine.schedule(for: shot, projectDefault: .default, rate: .twentyFour))
+        print(String(format: "[Perf] %d stills -> %d frames (grain+wobble, native RAF) in %.1fs = %.1f frames/s -> %@",
+                     shot.frames.count, outFrames, wall, Double(outFrames) / wall, url.lastPathComponent))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
 }
