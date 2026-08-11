@@ -211,6 +211,33 @@ public struct KineRootView: View {
             let isCommand = event.modifierFlags.contains(.command)
             let isOption = event.modifierFlags.contains(.option)
 
+            // Shots workspace: transport acts on the focused (hovered /
+            // selected) shot. Everything else falls through.
+            if workspace.appMode == .shots && !isCommand {
+                switch chars {
+                case " ":
+                    workspace.toggleShotPlayback()
+                    return nil
+                case "j":
+                    workspace.shotShuttle(direction: -1)
+                    return nil
+                case "k":
+                    workspace.shotStop()
+                    return nil
+                case "l":
+                    workspace.shotShuttle(direction: 1)
+                    return nil
+                case String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!)):
+                    workspace.shotStepFrames(isShift ? -10 : -1)
+                    return nil
+                case String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)):
+                    workspace.shotStepFrames(isShift ? 10 : 1)
+                    return nil
+                default:
+                    break
+                }
+            }
+
             // Command-modified shortcuts take precedence over bare keys.
             if isCommand {
                 switch chars {

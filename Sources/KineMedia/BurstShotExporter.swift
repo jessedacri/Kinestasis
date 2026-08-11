@@ -74,7 +74,7 @@ public struct BurstShotExporter: Sendable {
         let nativeSize: PixelSize
         if let s = shot.frames[schedule[0].frameIndex].pixelSize ?? shot.frames.first?.pixelSize {
             nativeSize = s
-        } else if let img = StillDecoder.decode(url: shot.frames[0].url, maxPixel: 100_000) {
+        } else if let img = StillDecoder.decode(url: shot.sourceURL(for: shot.frames[0]), maxPixel: 100_000) {
             nativeSize = PixelSize(width: img.width, height: img.height)
         } else {
             throw ExportError.stillDecodeFailed(shot.frames[0].url)
@@ -125,7 +125,7 @@ public struct BurstShotExporter: Sendable {
                 try? FileManager.default.removeItem(at: outputURL)
                 return outputURL
             }
-            let stillURL = shot.frames[event.frameIndex].url
+            let stillURL = shot.sourceURL(for: shot.frames[event.frameIndex])
             let maxEdge = max(nativeSize.width, nativeSize.height)
             let ev = ExposureWobble.evOffset(
                 outputFrame: event.startFrame, fps: rate.fps,

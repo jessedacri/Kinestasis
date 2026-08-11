@@ -92,10 +92,23 @@ final class StillsIngestTests: XCTestCase {
             URL(fileURLWithPath: "/card/DSC003.JPG"),
             URL(fileURLWithPath: "/other/DSC001.JPG"),   // different dir — distinct still
         ]
-        let collapsed = StillsIngest.collapseRawJpegPairs(urls)
-        XCTAssertEqual(collapsed.map(\.path), [
+        let (primaries, pairs) = StillsIngest.pairRawJpeg(urls)
+        XCTAssertEqual(primaries.map(\.path), [
             "/card/DSC001.ARW", "/card/DSC002.ARW", "/card/DSC003.JPG", "/other/DSC001.JPG",
         ])
+        XCTAssertEqual(pairs[URL(fileURLWithPath: "/card/DSC001.ARW")]?.path, "/card/DSC001.JPG")
+        XCTAssertNil(pairs[URL(fileURLWithPath: "/card/DSC002.ARW")], "no JPEG twin")
+    }
+
+    func testSourceToggleSwitchesEffectiveURL() {
+        let frame = StillFrame(url: URL(fileURLWithPath: "/c/A.ARW"),
+                               pairedJpegURL: URL(fileURLWithPath: "/c/A.JPG"), captureTime: 0)
+        var shot = BurstShot(name: "S", frames: [frame])
+        XCTAssertEqual(shot.sourceURL(for: frame).path, "/c/A.ARW")
+        XCTAssertEqual(shot.fileTypeLabel, "Sony ARW (+JPEG)")
+        shot.useJpegSource = true
+        XCTAssertEqual(shot.sourceURL(for: frame).path, "/c/A.JPG")
+        XCTAssertTrue(shot.hasRawJpegPairs)
     }
 
     func testScanSeparatesVideosAndIgnoresJunk() throws {

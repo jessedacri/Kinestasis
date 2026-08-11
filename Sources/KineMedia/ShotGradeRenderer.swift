@@ -40,6 +40,34 @@ public final class ShotGradeRenderer: @unchecked Sendable {
         return context.createCGImage(image, from: extent)
     }
 
+    /// Fast preview path: apply the grade to an ALREADY-DECODED small
+    /// frame (the preview cache's base image) using the JPEG chain for
+    /// every source. Skips the CIRAWFilter develop — WB/exposure are
+    /// approximated on display pixels, exact on export — which is what
+    /// lets sliders and playback stay live at frame rate.
+    public func gradePreview(_ image: CGImage, grade: ShotGrade, evOffset: Double = 0, grainSeed: Int64 = 0) -> CGImage? {
+        if grade.isIdentity && evOffset == 0 { return image }
+        var ci = CIImage(cgImage: image)
+        var effective = grade
+        effective.exposure += evOffset
+        if effective.exposure != 0 {
+            ci = ci.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: effective.exposure])
+        }
+        if effective.temperature != 0 || effective.tint != 0 {
+            ci = ci.applyingFilter("CITemperatureAndTint", parameters: [
+                "inputNeutral": CIVector(x: 6500 + effective.temperature * 25, y: effective.tint * 0.5),
+                "inputTargetNeutral": CIVector(x: 6500, y: 0),
+            ])
+        }
+        ci = applyToneAndLook(ci, grade: effective, isRAW: false)
+        if grade.grainAmount > 0 {
+            ci = applyGrain(ci, grade: grade, seed: grainSeed)
+        }
+        let extent = ci.extent
+        guard !extent.isInfinite, extent.width > 0 else { return nil }
+        return context.createCGImage(ci, from: extent)
+    }
+
     /// Film grain: luma noise soft-lit over the image, sized by
     /// `grainSize`, weighted toward shadows or highlights by
     /// `grainResponse`. The infinite CIRandomGenerator field is translated

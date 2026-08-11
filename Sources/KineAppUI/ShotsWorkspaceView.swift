@@ -102,8 +102,16 @@ struct ShotsWorkspaceView: View {
             Spacer()
 
             if workspace.importing {
-                ProgressView().controlSize(.small)
-                Text("Importing…").font(.system(size: 11)).foregroundStyle(.secondary)
+                if let p = workspace.importProgress, p.total > 0 {
+                    ProgressView(value: Double(p.done), total: Double(p.total))
+                        .controlSize(.small).frame(width: 120)
+                    Text("Reading \(p.done.formatted()) / \(p.total.formatted())")
+                        .font(KineTheme.monoSmall)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning…").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
             }
 
             if let progress = workspace.shotExportProgress {
@@ -116,16 +124,18 @@ struct ShotsWorkspaceView: View {
                     Label("Assemble", systemImage: "timeline.selection")
                         .font(.system(size: 11, weight: .semibold))
                 }
-                .help("Render all shots and lay them on a timeline for trimming")
+                .help("Render the included shots and lay them on a timeline for trimming")
 
+                let included = workspace.exportableShots.count
                 Menu {
                     Button("ProRes 422 HQ + XML…") { workspace.exportShots(codec: .proRes422HQ) }
                     Button("ProRes 4444 + XML…") { workspace.exportShots(codec: .proRes4444) }
                 } label: {
-                    Label("Export \(workspace.orderedShots.count) Shots", systemImage: "square.and.arrow.up")
+                    Label("Export \(included) of \(workspace.orderedShots.count)", systemImage: "square.and.arrow.up")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .fixedSize()
+                .disabled(included == 0)
             }
         }
         .padding(.horizontal, 14)
@@ -372,18 +382,51 @@ private struct ShotCard: View {
         return 3.0 / 2.0
     }
 
+    @State private var hoverFraction: Double? = nil
+
+    private var schedule: [StillEvent] {
+        ShotTimingEngine.schedule(for: shot, projectDefault: workspace.project.settings.burst.timing, rate: rate)
+    }
+
+    /// Frame under the skim cursor (or the transport playhead when this
+    /// shot is selected), honoring the RAW/JPEG source toggle.
+    private func skimURL(fraction: Double) -> URL? {
+        let sched = schedule
+        let total = ShotTimingEngine.totalFrames(sched)
+        guard total > 0 else { return nil }
+        let f = Int64((fraction * Double(total - 1)).rounded())
+        guard let event = ShotTimingEngine.event(at: f, in: sched),
+              shot.frames.indices.contains(event.frameIndex) else { return nil }
+        return shot.sourceURL(for: shot.frames[event.frameIndex])
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            ZStack(alignment: .topLeading) {
-                let _ = workspace.previewVersion
-                let images = workspace.shotThumbnails[shot.id] ?? []
-                if images.isEmpty {
-                    Rectangle().fill(Color.black.opacity(0.35))
-                        .overlay(ProgressView().controlSize(.small))
-                } else {
-                    ShotFilmstrip(images: images, aspect: aspect)
+            GeometryReader { geo in
+                ZStack(alignment: .topLeading) {
+                    let _ = workspace.previewVersion
+                    stripOrSkimFrame
+                    playheadLine(width: geo.size.width)
+                    badges
+                    includeToggle
                 }
-                badges
+                .contentShape(Rectangle())
+                .onContinuousHover(coordinateSpace: .local) { phase in
+                    switch phase {
+                    case .active(let p):
+                        let frac = geo.size.width > 0 ? Double(p.x / geo.size.width) : 0
+                        hoverFraction = max(0, min(1, frac))
+                        // Hover hands transport focus to this shot — same
+                        // as the source-viewer filmstrips: space/JKL act
+                        // on what's under the cursor.
+                        workspace.skimShot(shot.id, fraction: hoverFraction!)
+                        if let url = skimURL(fraction: hoverFraction!) {
+                            workspace.requestPreviewFrame(url)
+                        }
+                    case .ended:
+                        hoverFraction = nil
+                    }
+                }
             }
             .frame(height: 88)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -392,11 +435,13 @@ private struct ShotCard: View {
                     .stroke(isSelected ? KineTheme.accent : Color.black.opacity(0.4),
                             lineWidth: isSelected ? 2 : 0.5)
             )
+            .opacity(shot.includeInExport ? 1 : 0.45)
 
             HStack(spacing: 6) {
                 Text(shot.name)
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
+                    .opacity(shot.includeInExport ? 1 : 0.5)
                 Spacer(minLength: 0)
                 Text(statsLine)
                     .font(KineTheme.monoSmall)
@@ -423,6 +468,69 @@ private struct ShotCard: View {
             }
             Divider()
             Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
+        }
+    }
+
+    /// While skimming (or when selected + playing), show the live frame
+    /// full-bleed; otherwise the filmstrip.
+    @ViewBuilder private var stripOrSkimFrame: some View {
+        let images = workspace.shotThumbnails[shot.id] ?? []
+        let liveURL: URL? = {
+            if let f = hoverFraction { return skimURL(fraction: f) }
+            if isSelected && workspace.shotPlayRate != 0 { return workspace.currentShotFrameURL() }
+            return nil
+        }()
+        if let liveURL, let frame = workspace.cachedPreviewFrame(liveURL) {
+            GeometryReader { geo in
+                Image(decorative: frame, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+            }
+        } else if images.isEmpty {
+            Rectangle().fill(Color.black.opacity(0.35))
+                .overlay(ProgressView().controlSize(.small))
+        } else {
+            ShotFilmstrip(images: images, aspect: aspect)
+        }
+    }
+
+    @ViewBuilder private func playheadLine(width: CGFloat) -> some View {
+        let fraction: Double? = {
+            if let f = hoverFraction { return f }
+            guard isSelected else { return nil }
+            let total = ShotTimingEngine.totalFrames(schedule)
+            guard total > 1 else { return nil }
+            return Double(workspace.shotPlayheadFrame) / Double(total - 1)
+        }()
+        if let fraction {
+            Rectangle()
+                .fill(Color.white)
+                .frame(width: 1.5, height: 88)
+                .shadow(color: .black.opacity(0.6), radius: 1)
+                .offset(x: CGFloat(fraction) * width - 0.75)
+        }
+    }
+
+    /// One-click include/exclude from export.
+    private var includeToggle: some View {
+        VStack {
+            HStack {
+                Spacer()
+                Button {
+                    workspace.setIncludeInExport(!shot.includeInExport, for: shot.id)
+                } label: {
+                    Image(systemName: shot.includeInExport ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(shot.includeInExport ? KineTheme.accent : .white.opacity(0.55))
+                        .shadow(color: .black.opacity(0.6), radius: 2)
+                }
+                .buttonStyle(.plain)
+                .help(shot.includeInExport ? "Included in export — click to exclude" : "Excluded from export — click to include")
+                .padding(6)
+            }
+            Spacer()
         }
     }
 
@@ -459,9 +567,7 @@ private struct ShotCard: View {
     }
 
     private var statsLine: String {
-        let schedule = ShotTimingEngine.schedule(
-            for: shot, projectDefault: workspace.project.settings.burst.timing, rate: rate)
         let seconds = Double(ShotTimingEngine.totalFrames(schedule)) / rate.fps
-        return String(format: "%.1fs · %@", seconds, timingModeLabel(mode))
+        return String(format: "%.1fs · %@ · %@", seconds, timingModeLabel(mode), shot.fileTypeLabel)
     }
 }

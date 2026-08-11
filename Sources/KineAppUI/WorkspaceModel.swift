@@ -272,6 +272,10 @@ public final class WorkspaceModel: ObservableObject {
     /// Non-nil while a shot batch export runs (0…1).
     @Published public var shotExportProgress: Double? = nil
 
+    /// (probed, total) while a stills import runs — drives the live
+    /// progress readout in the project bar.
+    @Published public var importProgress: (done: Int, total: Int)? = nil
+
     /// Top-level workspace mode. `.shots` is the app's home: import,
     /// group, time, grade, batch-export. `.assemble` is the inherited
     /// timeline layout for ordering/trimming and exporting one cut.
@@ -3570,8 +3574,11 @@ public final class WorkspaceModel: ObservableObject {
         let gap = project.settings.burst.gapThreshold
         let minBurst = project.settings.burst.minBurstCount
         let result = await Task.detached(priority: .userInitiated) {
-            ingester.ingest(folder: url, gapThreshold: gap, minBurstCount: minBurst)
+            ingester.ingest(folder: url, gapThreshold: gap, minBurstCount: minBurst) { done, total in
+                Task { @MainActor in self.importProgress = (done, total) }
+            }
         }.value
+        importProgress = nil
 
         for shot in result.shots where !shot.frames.isEmpty {
             project.mediaPool.shots[shot.id] = shot
@@ -3593,10 +3600,65 @@ public final class WorkspaceModel: ObservableObject {
 
     // MARK: - Singles (non-burst stills)
 
+    /// Change the min-burst threshold AND re-apply it to what's already
+    /// imported: shots that fall below dissolve into Singles; singles
+    /// that now form big-enough gap-groups are promoted back to shots.
     public func setMinBurstCount(_ count: Int) {
-        project.settings.burst.minBurstCount = max(1, count)
+        let threshold = max(1, count)
+        project.settings.burst.minBurstCount = threshold
+        let gap = project.settings.burst.gapThreshold
+
+        // Demote under-threshold shots.
+        for shot in orderedShots where shot.frames.count < threshold {
+            project.mediaPool.singles.append(contentsOf: shot.frames)
+            project.mediaPool.shots[shot.id] = nil
+            project.mediaPool.rootBin.children.removeAll {
+                if case .shot(let s) = $0 { return s == shot.id }
+                return false
+            }
+            if selectedShotID == shot.id { selectedShotID = nil }
+        }
+
+        // Promote singles that group into bursts at the new threshold.
+        var stillSingle: [StillFrame] = []
+        for group in BurstGrouper.group(project.mediaPool.singles, gapThreshold: gap) {
+            if group.count >= threshold {
+                let shot = BurstShot(name: promotedShotName(for: group), frames: group)
+                project.mediaPool.shots[shot.id] = shot
+                project.mediaPool.rootBin.children.append(.shot(shot.id))
+                scheduleShotThumbnails(for: shot)
+            } else {
+                stillSingle.append(contentsOf: group)
+            }
+        }
+        project.mediaPool.singles = stillSingle
         project.modifiedAt = Date()
         markDirty()
+    }
+
+    private func promotedShotName(for group: [StillFrame]) -> String {
+        let base = group.first?.url.deletingLastPathComponent().lastPathComponent ?? "Shot"
+        var n = 1
+        var name = String(format: "%@_S%03d", base, n)
+        let existing = Set(project.mediaPool.shots.values.map(\.name))
+        while existing.contains(name) {
+            n += 1
+            name = String(format: "%@_S%03d", base, n)
+        }
+        return name
+    }
+
+    public func setIncludeInExport(_ include: Bool, for id: ShotID) {
+        guard var shot = project.mediaPool.shots[id] else { return }
+        shot.includeInExport = include
+        project.mediaPool.shots[id] = shot
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    /// Shots that batch export / assembly actually take.
+    public var exportableShots: [BurstShot] {
+        orderedShots.filter(\.includeInExport)
     }
 
     public func removeSinglesFromProject() {
@@ -3770,7 +3832,7 @@ public final class WorkspaceModel: ObservableObject {
     /// Timeline sources ARE the rendered files, so the cut is WYSIWYG
     /// with the batch export by construction.
     public func assembleShots() {
-        let shots = orderedShots
+        let shots = exportableShots
         guard !shots.isEmpty, shotExportProgress == nil else { return }
         let rate = shotFrameRate
         let defaults = project.settings.burst.timing
@@ -3910,6 +3972,162 @@ public final class WorkspaceModel: ObservableObject {
         }
     }
 
+    // MARK: - Shot preview frames (fast skim/playback cache)
+
+    /// LRU of ~448px decoded frames keyed by source URL. Base (ungraded)
+    /// images — grades ride on top via `ShotGradeRenderer.gradePreview`,
+    /// which is what keeps slider changes live without re-decoding.
+    private var shotFrameCache: [URL: CGImage] = [:]
+    private var shotFrameOrder: [URL] = []
+    private var shotFramesInFlight: Set<URL> = []
+    private static let shotFrameCap = 400
+    private static let shotFramePixels = 448
+
+    public func cachedPreviewFrame(_ url: URL) -> CGImage? {
+        shotFrameCache[url]
+    }
+
+    /// Decode a preview frame off-main if it isn't cached; bumps
+    /// `previewVersion` when it lands.
+    public func requestPreviewFrame(_ url: URL) {
+        guard shotFrameCache[url] == nil, !shotFramesInFlight.contains(url) else { return }
+        shotFramesInFlight.insert(url)
+        Task.detached(priority: .userInitiated) {
+            let image = StillDecoder.preview(url: url, maxPixel: Self.shotFramePixels)
+            await MainActor.run {
+                self.shotFramesInFlight.remove(url)
+                if let image { self.storePreviewFrame(url: url, image: image) }
+            }
+        }
+    }
+
+    private func storePreviewFrame(url: URL, image: CGImage) {
+        if shotFrameCache[url] == nil { shotFrameOrder.append(url) }
+        shotFrameCache[url] = image
+        while shotFrameOrder.count > Self.shotFrameCap {
+            shotFrameCache[shotFrameOrder.removeFirst()] = nil
+        }
+        previewVersion += 1
+    }
+
+    /// Warm the cache for a whole shot (first ~160 frames) so skim and
+    /// playback are instant.
+    public func prefetchPreviewFrames(for shot: BurstShot) {
+        for frame in shot.frames.prefix(160) {
+            requestPreviewFrame(shot.sourceURL(for: frame))
+        }
+    }
+
+    /// Drop cached frames for a shot whose source switched (RAW↔JPEG).
+    public func invalidatePreviews(for shot: BurstShot) {
+        for frame in shot.frames {
+            shotFrameCache[frame.url] = nil
+            if let jpeg = frame.pairedJpegURL { shotFrameCache[jpeg] = nil }
+        }
+        shotFrameOrder.removeAll { shotFrameCache[$0] == nil }
+        shotThumbnails[shot.id] = nil
+        scheduleShotThumbnails(for: shot)
+        previewVersion += 1
+    }
+
+    public func setUseJpegSource(_ useJpeg: Bool, for id: ShotID) {
+        guard var shot = project.mediaPool.shots[id], shot.useJpegSource != useJpeg else { return }
+        shot.useJpegSource = useJpeg
+        project.mediaPool.shots[id] = shot
+        invalidatePreviews(for: shot)
+        prefetchPreviewFrames(for: shot)
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    // MARK: - Shot transport (spacebar / JKL on the selected shot)
+
+    /// Output-frame playhead within the selected shot's schedule.
+    @Published public var shotPlayheadFrame: Int64 = 0
+    /// 0 = stopped; ±1 / ±2 / ±4 = J-K-L style shuttle.
+    @Published public var shotPlayRate: Double = 0
+    private var shotPlayTimer: Timer?
+
+    public func scheduleForSelectedShot() -> [StillEvent] {
+        guard let shot = selectedShot else { return [] }
+        return ShotTimingEngine.schedule(
+            for: shot, projectDefault: project.settings.burst.timing, rate: shotFrameRate)
+    }
+
+    public func toggleShotPlayback() {
+        shotPlayRate == 0 ? shotPlay(rate: 1) : shotStop()
+    }
+
+    public func shotShuttle(direction: Double) {
+        // L/J taps: start at 1×, each further tap doubles (max 4×);
+        // opposite direction resets to 1×.
+        if shotPlayRate.sign == (direction < 0 ? .minus : .plus), shotPlayRate != 0 {
+            shotPlay(rate: min(4, abs(shotPlayRate) * 2) * direction)
+        } else {
+            shotPlay(rate: direction)
+        }
+    }
+
+    public func shotPlay(rate: Double) {
+        guard let shot = selectedShot, !shot.frames.isEmpty else { return }
+        prefetchPreviewFrames(for: shot)
+        shotPlayRate = rate
+        shotPlayTimer?.invalidate()
+        let interval = 1.0 / shotFrameRate.fps
+        shotPlayTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.shotPlaybackTick() }
+        }
+        RunLoop.main.add(shotPlayTimer!, forMode: .common)
+    }
+
+    public func shotStop() {
+        shotPlayRate = 0
+        shotPlayTimer?.invalidate()
+        shotPlayTimer = nil
+    }
+
+    public func shotStepFrames(_ n: Int64) {
+        shotStop()
+        let total = ShotTimingEngine.totalFrames(scheduleForSelectedShot())
+        guard total > 0 else { return }
+        shotPlayheadFrame = max(0, min(total - 1, shotPlayheadFrame + n))
+    }
+
+    /// Hover-skim: land the playhead at a fraction of the shot (also
+    /// selects it so space/JKL act on what's under the cursor — same
+    /// hover-hands-focus behavior as the source-viewer filmstrips).
+    public func skimShot(_ id: ShotID, fraction: Double) {
+        if selectedShotID != id {
+            selectedShotID = id
+            shotStop()
+        }
+        if let shot = project.mediaPool.shots[id] { prefetchPreviewFrames(for: shot) }
+        let total = ShotTimingEngine.totalFrames(scheduleForSelectedShot())
+        guard total > 0 else { return }
+        shotPlayheadFrame = max(0, min(total - 1, Int64((fraction * Double(total - 1)).rounded())))
+    }
+
+    private func shotPlaybackTick() {
+        let schedule = scheduleForSelectedShot()
+        let total = ShotTimingEngine.totalFrames(schedule)
+        guard total > 0, shotPlayRate != 0 else { return }
+        var next = shotPlayheadFrame + Int64(shotPlayRate.rounded())
+        // Loop — burst preview wants to cycle, not stop at the end.
+        if next >= total { next = 0 }
+        if next < 0 { next = total - 1 }
+        shotPlayheadFrame = next
+    }
+
+    /// The still on screen at the current shot playhead, honoring the
+    /// RAW/JPEG source toggle.
+    public func currentShotFrameURL() -> URL? {
+        guard let shot = selectedShot else { return nil }
+        let schedule = scheduleForSelectedShot()
+        guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule),
+              shot.frames.indices.contains(event.frameIndex) else { return nil }
+        return shot.sourceURL(for: shot.frames[event.frameIndex])
+    }
+
     // MARK: - Shot filmstrip thumbnails
 
     public func scheduleShotThumbnails(for shot: BurstShot) {
@@ -3917,12 +4135,13 @@ public final class WorkspaceModel: ObservableObject {
         shotThumbsInFlight.insert(shot.id)
         let frames = shot.frames
         let shotID = shot.id
+        let snapshot = shot
         Task.detached(priority: .utility) {
             let count = min(Self.shotThumbMax, frames.count)
             let urls: [URL] = (0..<count).map { i in
                 let idx = count == 1 ? 0
                     : Int((Double(i) / Double(count - 1) * Double(frames.count - 1)).rounded())
-                return frames[idx].url
+                return snapshot.sourceURL(for: frames[idx])
             }
             let images = urls.compactMap { StillDecoder.preview(url: $0, maxPixel: 200) }
             await MainActor.run {
@@ -3938,7 +4157,7 @@ public final class WorkspaceModel: ObservableObject {
     /// Batch-export shots to ProRes, one movie per shot, into a directory
     /// the user picks. `ids` nil → every shot in bin order.
     public func exportShots(_ ids: [ShotID]? = nil, codec: BurstShotExporter.Codec) {
-        let shots = ids.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? orderedShots
+        let shots = ids.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? exportableShots
         guard !shots.isEmpty, shotExportProgress == nil else { return }
 
         let panel = NSOpenPanel()

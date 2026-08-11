@@ -23,7 +23,10 @@ public struct StillsIngest: Sendable {
     public static let videoExtensions: Set<String> = ["mov", "mp4", "m4v"]
 
     public struct FolderScan: Sendable {
+        /// Primary stills — the RAW of a RAW+JPEG pair.
         public var stills: [URL]
+        /// RAW primary → its JPEG twin, for pairs.
+        public var jpegPairs: [URL: URL]
         public var videos: [URL]
     }
 
@@ -44,7 +47,7 @@ public struct StillsIngest: Sendable {
 
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: root.path, isDirectory: &isDir) else {
-            return FolderScan(stills: [], videos: [])
+            return FolderScan(stills: [], jpegPairs: [:], videos: [])
         }
         if !isDir.boolValue {
             classify(root)
@@ -56,31 +59,42 @@ public struct StillsIngest: Sendable {
                 }
             }
         }
-        stills = Self.collapseRawJpegPairs(stills)
-        stills.sort { $0.path < $1.path }
+        let (primaries, pairs) = Self.pairRawJpeg(stills)
+        stills = primaries.sorted { $0.path < $1.path }
         videos.sort { $0.path < $1.path }
-        return FolderScan(stills: stills, videos: videos)
+        return FolderScan(stills: stills, jpegPairs: pairs, videos: videos)
     }
 
     /// Cameras writing RAW+JPEG drop two files per shutter press
     /// (DSC01234.ARW + DSC01234.JPG). Collapse each same-directory
-    /// basename pair to one still, preferring the RAW.
-    static func collapseRawJpegPairs(_ stills: [URL]) -> [URL] {
+    /// basename pair to one primary still (the RAW), remembering the JPEG
+    /// twin so shots can switch their frame source between the two.
+    static func pairRawJpeg(_ stills: [URL]) -> (primaries: [URL], jpegPairs: [URL: URL]) {
         let jpegExts: Set<String> = ["jpg", "jpeg", "heic", "heif"]
         var byKey: [String: URL] = [:]
+        var jpegByKey: [String: URL] = [:]
         var order: [String] = []
         for url in stills {
             let key = url.deletingPathExtension().path.lowercased()
-            if let existing = byKey[key] {
-                let existingIsJpeg = jpegExts.contains(existing.pathExtension.lowercased())
-                let newIsRaw = !jpegExts.contains(url.pathExtension.lowercased())
-                if existingIsJpeg && newIsRaw { byKey[key] = url }
-            } else {
+            let isJpeg = jpegExts.contains(url.pathExtension.lowercased())
+            if byKey[key] == nil {
                 byKey[key] = url
                 order.append(key)
+                if isJpeg { jpegByKey[key] = url }
+            } else if isJpeg {
+                jpegByKey[key] = url                       // RAW already primary
+            } else if jpegExts.contains(byKey[key]!.pathExtension.lowercased()) {
+                jpegByKey[key] = byKey[key]                // promote RAW to primary
+                byKey[key] = url
             }
         }
-        return order.compactMap { byKey[$0] }
+        var pairs: [URL: URL] = [:]
+        for key in order {
+            if let primary = byKey[key], let jpeg = jpegByKey[key], primary != jpeg {
+                pairs[primary] = jpeg
+            }
+        }
+        return (order.compactMap { byKey[$0] }, pairs)
     }
 
     /// Read one still's capture time + pixel size without decoding pixels.
@@ -137,12 +151,33 @@ public struct StillsIngest: Sendable {
         public var videos: [URL]
     }
 
-    /// Full ingest: scan → probe every still → group by capture gap →
-    /// split real bursts from singles. Shots are named `<folder>_S001`,
-    /// `_S002`, … in capture order.
-    public func ingest(folder: URL, gapThreshold: TimeInterval, minBurstCount: Int = 3) -> IngestResult {
+    /// Full ingest: scan → probe every still (parallel, metadata-only) →
+    /// group by capture gap → split real bursts from singles. Shots are
+    /// named `<folder>_S001`, `_S002`, … in capture order. `progress`
+    /// fires (done, total) from worker threads — hop to the main actor
+    /// before touching UI state.
+    public func ingest(folder: URL, gapThreshold: TimeInterval, minBurstCount: Int = 3,
+                       progress: (@Sendable (Int, Int) -> Void)? = nil) -> IngestResult {
         let scanResult = scan(folder)
-        let frames = scanResult.stills.map { probeStill($0) }
+        let urls = scanResult.stills
+        let total = urls.count
+        var results = [StillFrame?](repeating: nil, count: total)
+        let lock = NSLock()
+        var done = 0
+        results.withUnsafeMutableBufferPointer { buffer in
+            let base = buffer.baseAddress!
+            DispatchQueue.concurrentPerform(iterations: total) { i in
+                var frame = self.probeStill(urls[i])
+                frame.pairedJpegURL = scanResult.jpegPairs[urls[i]]
+                lock.lock()
+                base[i] = frame
+                done += 1
+                let count = done
+                lock.unlock()
+                if count % 64 == 0 || count == total { progress?(count, total) }
+            }
+        }
+        let frames = results.compactMap { $0 }
         let groups = BurstGrouper.group(frames, gapThreshold: gapThreshold)
         let floor = max(1, minBurstCount)
         let base = folder.deletingPathExtension().lastPathComponent

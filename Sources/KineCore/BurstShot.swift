@@ -5,17 +5,61 @@ public struct ShotID: KineID { public let rawValue: UUID; public init() { rawVal
 /// One still image inside a burst shot.
 public struct StillFrame: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID
+    /// Primary file — the RAW when the camera wrote a RAW+JPEG pair.
     public var url: URL
+    /// The JPEG twin of a RAW+JPEG pair, kept so the shot can switch its
+    /// frame source between the two.
+    public var pairedJpegURL: URL?
     /// EXIF DateTimeOriginal + SubSecTimeOriginal, as seconds since 1970.
     /// Sub-second precision is what makes as-shot cadence work.
     public var captureTime: TimeInterval
     public var pixelSize: PixelSize?
 
-    public init(id: UUID = UUID(), url: URL, captureTime: TimeInterval, pixelSize: PixelSize? = nil) {
+    public init(id: UUID = UUID(), url: URL, pairedJpegURL: URL? = nil, captureTime: TimeInterval, pixelSize: PixelSize? = nil) {
         self.id = id
         self.url = url
+        self.pairedJpegURL = pairedJpegURL
         self.captureTime = captureTime
         self.pixelSize = pixelSize
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, url, pairedJpegURL, captureTime, pixelSize }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        url = try c.decode(URL.self, forKey: .url)
+        pairedJpegURL = try c.decodeIfPresent(URL.self, forKey: .pairedJpegURL)
+        captureTime = try c.decode(TimeInterval.self, forKey: .captureTime)
+        pixelSize = try c.decodeIfPresent(PixelSize.self, forKey: .pixelSize)
+    }
+}
+
+/// Human-readable file-type labels for the formats Kinestasis ingests.
+public enum CameraFileType {
+    public static func label(forExtension ext: String) -> String {
+        switch ext.lowercased() {
+        case "raf":          return "Fujifilm RAF"
+        case "arw":          return "Sony ARW"
+        case "cr2":          return "Canon CR2"
+        case "cr3":          return "Canon CR3"
+        case "crw":          return "Canon CRW"
+        case "nef", "nrw":   return "Nikon \(ext.uppercased())"
+        case "orf":          return "Olympus ORF"
+        case "rw2":          return "Panasonic RW2"
+        case "pef":          return "Pentax PEF"
+        case "srw":          return "Samsung SRW"
+        case "erf":          return "Epson ERF"
+        case "rwl":          return "Leica RWL"
+        case "3fr", "fff":   return "Hasselblad \(ext.uppercased())"
+        case "iiq":          return "Phase One IIQ"
+        case "dng":          return "DNG"
+        case "jpg", "jpeg":  return "JPEG"
+        case "heic", "heif": return "HEIC"
+        case "tif", "tiff":  return "TIFF"
+        case "png":          return "PNG"
+        default:             return ext.uppercased()
+        }
     }
 }
 
@@ -121,17 +165,25 @@ public struct BurstShot: Codable, Sendable, Identifiable {
     /// 0…1 both axes. Empty or < 2 points = no ramp. Total duration is
     /// preserved; the curve redistributes it.
     public var speedRamp: [CurvePoint]
+    /// When the camera wrote RAW+JPEG pairs, use the JPEG as the frame
+    /// source instead of the RAW.
+    public var useJpegSource: Bool
+    /// One-click exclusion from batch export / assembly without removing
+    /// the shot.
+    public var includeInExport: Bool
 
-    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = []) {
+    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = [], useJpegSource: Bool = false, includeInExport: Bool = true) {
         self.id = id
         self.name = name
         self.frames = frames
         self.timingOverride = timingOverride
         self.grade = grade
         self.speedRamp = speedRamp
+        self.useJpegSource = useJpegSource
+        self.includeInExport = includeInExport
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade, speedRamp }
+    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade, speedRamp, useJpegSource, includeInExport }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -141,6 +193,30 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         timingOverride = try c.decodeIfPresent(ShotTimingMode.self, forKey: .timingOverride)
         grade = try c.decodeIfPresent(ShotGrade.self, forKey: .grade) ?? .identity
         speedRamp = try c.decodeIfPresent([CurvePoint].self, forKey: .speedRamp) ?? []
+        useJpegSource = try c.decodeIfPresent(Bool.self, forKey: .useJpegSource) ?? false
+        includeInExport = try c.decodeIfPresent(Bool.self, forKey: .includeInExport) ?? true
+    }
+
+    /// The file to decode for a frame, honoring the RAW/JPEG source toggle.
+    public func sourceURL(for frame: StillFrame) -> URL {
+        if useJpegSource, let jpeg = frame.pairedJpegURL { return jpeg }
+        return frame.url
+    }
+
+    /// True when any frame carries a RAW+JPEG pair (source toggle applies).
+    public var hasRawJpegPairs: Bool {
+        frames.contains { $0.pairedJpegURL != nil }
+    }
+
+    /// Display label like "Fujifilm RAF" / "JPEG", or "RAF + JPEG" when
+    /// pairs exist (with the active source first).
+    public var fileTypeLabel: String {
+        guard let first = frames.first else { return "" }
+        if hasRawJpegPairs {
+            let raw = CameraFileType.label(forExtension: first.url.pathExtension)
+            return useJpegSource ? "JPEG (+\(raw.split(separator: " ").last.map(String.init) ?? "RAW"))" : "\(raw) (+JPEG)"
+        }
+        return CameraFileType.label(forExtension: sourceURL(for: first).pathExtension)
     }
 
     public func timing(projectDefault: ShotTimingMode) -> ShotTimingMode {
