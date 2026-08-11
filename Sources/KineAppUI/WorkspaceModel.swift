@@ -3568,21 +3568,87 @@ public final class WorkspaceModel: ObservableObject {
     private func ingestStills(url: URL) async {
         let ingester = stillsIngest
         let gap = project.settings.burst.gapThreshold
-        let (shots, videos) = await Task.detached(priority: .userInitiated) {
-            ingester.ingest(folder: url, gapThreshold: gap)
+        let minBurst = project.settings.burst.minBurstCount
+        let result = await Task.detached(priority: .userInitiated) {
+            ingester.ingest(folder: url, gapThreshold: gap, minBurstCount: minBurst)
         }.value
 
-        for shot in shots where !shot.frames.isEmpty {
+        for shot in result.shots where !shot.frames.isEmpty {
             project.mediaPool.shots[shot.id] = shot
             project.mediaPool.rootBin.children.append(.shot(shot.id))
             scheduleShotThumbnails(for: shot)
         }
-        if !shots.isEmpty {
+        if !result.singles.isEmpty {
+            let known = Set(project.mediaPool.singles.map(\.url))
+            project.mediaPool.singles.append(contentsOf: result.singles.filter { !known.contains($0.url) })
+        }
+        if !result.shots.isEmpty || !result.singles.isEmpty {
             project.modifiedAt = Date()
             markDirty()
         }
-        for video in videos {
+        for video in result.videos {
             await ingestSingle(url: video)
+        }
+    }
+
+    // MARK: - Singles (non-burst stills)
+
+    public func setMinBurstCount(_ count: Int) {
+        project.settings.burst.minBurstCount = max(1, count)
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func removeSinglesFromProject() {
+        project.mediaPool.singles = []
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func revealSinglesInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting(project.mediaPool.singles.prefix(50).map(\.url))
+    }
+
+    /// Physically move the singles OUT of the burst folders into a folder
+    /// the user picks (Finder-style move, not delete). Files that fail to
+    /// move stay listed; moved ones leave the project.
+    public func pruneSinglesToFolder() {
+        let singles = project.mediaPool.singles
+        guard !singles.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Move \(singles.count) Non-Burst Stills"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Move \(singles.count) Stills Here"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        var remaining: [StillFrame] = []
+        var failures = 0
+        for still in singles {
+            let target = destination.appendingPathComponent(still.url.lastPathComponent)
+            do {
+                if FileManager.default.fileExists(atPath: target.path) {
+                    // Same name from another card/day — keep both.
+                    let unique = destination.appendingPathComponent(
+                        "\(still.url.deletingPathExtension().lastPathComponent)-\(UUID().uuidString.prefix(6)).\(still.url.pathExtension)")
+                    try FileManager.default.moveItem(at: still.url, to: unique)
+                } else {
+                    try FileManager.default.moveItem(at: still.url, to: target)
+                }
+            } catch {
+                remaining.append(still)
+                failures += 1
+            }
+        }
+        project.mediaPool.singles = remaining
+        project.modifiedAt = Date()
+        markDirty()
+        if failures > 0 {
+            let alert = NSAlert()
+            alert.messageText = "\(failures) stills could not be moved"
+            alert.informativeText = "They remain in place and stay listed under Singles."
+            alert.runModal()
         }
     }
 

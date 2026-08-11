@@ -58,17 +58,44 @@ final class StillsIngestTests: XCTestCase {
     }
 
     func testIngestGroupsByGapAndNamesShots() throws {
-        // Burst 1: three stills 0.25s apart. Burst 2: two stills 5s later.
+        // Burst 1: three stills 0.25s apart. Burst 2: two stills 5s later
+        // (below the default min-burst of 3 → singles, not a shot).
         _ = try writeJPEG(name: "b1.jpg", dateTime: "2026:08:10 12:00:00", subsec: "00")
         _ = try writeJPEG(name: "b2.jpg", dateTime: "2026:08:10 12:00:00", subsec: "25")
         _ = try writeJPEG(name: "b3.jpg", dateTime: "2026:08:10 12:00:00", subsec: "50")
         _ = try writeJPEG(name: "c1.jpg", dateTime: "2026:08:10 12:00:06", subsec: "00")
         _ = try writeJPEG(name: "c2.jpg", dateTime: "2026:08:10 12:00:06", subsec: "40")
-        let (shots, videos) = StillsIngest().ingest(folder: dir, gapThreshold: 2.0)
-        XCTAssertEqual(shots.map { $0.frames.count }, [3, 2])
-        XCTAssertTrue(videos.isEmpty)
-        XCTAssertTrue(shots[0].name.hasSuffix("_S001"))
-        XCTAssertTrue(shots[1].name.hasSuffix("_S002"))
+        let result = StillsIngest().ingest(folder: dir, gapThreshold: 2.0)
+        XCTAssertEqual(result.shots.map { $0.frames.count }, [3])
+        XCTAssertEqual(result.singles.count, 2)
+        XCTAssertTrue(result.videos.isEmpty)
+        XCTAssertTrue(result.shots[0].name.hasSuffix("_S001"))
+    }
+
+    func testMinBurstCountAdjustsSinglesSplit() throws {
+        _ = try writeJPEG(name: "b1.jpg", dateTime: "2026:08:10 12:00:00", subsec: "00")
+        _ = try writeJPEG(name: "b2.jpg", dateTime: "2026:08:10 12:00:00", subsec: "25")
+        _ = try writeJPEG(name: "lone.jpg", dateTime: "2026:08:10 12:00:30", subsec: "00")
+        let relaxed = StillsIngest().ingest(folder: dir, gapThreshold: 2.0, minBurstCount: 2)
+        XCTAssertEqual(relaxed.shots.map { $0.frames.count }, [2])
+        XCTAssertEqual(relaxed.singles.count, 1)
+        let strict = StillsIngest().ingest(folder: dir, gapThreshold: 2.0, minBurstCount: 3)
+        XCTAssertTrue(strict.shots.isEmpty)
+        XCTAssertEqual(strict.singles.count, 3)
+    }
+
+    func testRawJpegPairsCollapseToOneStillPreferringRaw() {
+        let urls = [
+            URL(fileURLWithPath: "/card/DSC001.JPG"),
+            URL(fileURLWithPath: "/card/DSC001.ARW"),
+            URL(fileURLWithPath: "/card/DSC002.ARW"),
+            URL(fileURLWithPath: "/card/DSC003.JPG"),
+            URL(fileURLWithPath: "/other/DSC001.JPG"),   // different dir — distinct still
+        ]
+        let collapsed = StillsIngest.collapseRawJpegPairs(urls)
+        XCTAssertEqual(collapsed.map(\.path), [
+            "/card/DSC001.ARW", "/card/DSC002.ARW", "/card/DSC003.JPG", "/other/DSC001.JPG",
+        ])
     }
 
     func testScanSeparatesVideosAndIgnoresJunk() throws {
@@ -87,7 +114,7 @@ final class StillsIngestTests: XCTestCase {
                                       dateTime: "2026:08:10 12:00:00",
                                       subsec: String(format: "%02d", i * 10)))
         }
-        let (shots, _) = StillsIngest().ingest(folder: dir, gapThreshold: 2.0)
+        let shots = StillsIngest().ingest(folder: dir, gapThreshold: 2.0).shots
         XCTAssertEqual(shots.count, 1)
 
         let out = dir.appendingPathComponent("out", isDirectory: true)

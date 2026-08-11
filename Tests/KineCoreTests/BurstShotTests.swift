@@ -192,4 +192,23 @@ final class BurstShotTests: XCTestCase {
         let half = ExposureWobble.evOffset(outputFrame: 13, fps: 24, intensity: 50, rate: 4)
         XCTAssertEqual(half, full / 2, accuracy: 1e-12)
     }
+
+    // MARK: - Whole-second timestamp spreading
+
+    func testEqualTimestampsSpreadEvenlyAcrossTheSecond() {
+        let frames = [10.0, 10.0, 10.0, 10.0, 11.0, 11.0].map { frame($0) }
+        let spread = BurstGrouper.spreadEqualTimestamps(frames)
+        XCTAssertEqual(spread.map(\.captureTime), [10.0, 10.25, 10.5, 10.75, 11.0, 11.5])
+    }
+
+    func testWholeSecondBurstKeepsAsShotCadenceAlive() {
+        // X-Pro2 style: 8 stills across 2 whole-second stamps. After the
+        // grouping spread, as-shot at 24 fps must keep every still visible.
+        let raw = (0..<8).map { frame(Double($0 / 4)) }
+        let grouped = BurstGrouper.group(raw, gapThreshold: 2.0)
+        XCTAssertEqual(grouped.count, 1)
+        let events = ShotTimingEngine.schedule(frames: grouped[0], mode: .asShot(rate: 1.0), rate: .twentyFour)
+        XCTAssertEqual(events.count, 8, "no stills collapsed by whole-second timestamps")
+        XCTAssertEqual(events.map(\.frameCount), [6, 6, 6, 6, 6, 6, 6, 6])
+    }
 }

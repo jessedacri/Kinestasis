@@ -69,9 +69,11 @@ final class EndToEndProofTests: XCTestCase {
         }
 
         // Ingest + group.
-        let (shots, videos) = StillsIngest().ingest(folder: folder, gapThreshold: 2.0)
+        let result = StillsIngest().ingest(folder: folder, gapThreshold: 2.0)
+        let shots = result.shots
         XCTAssertEqual(shots.map { $0.frames.count }, [12, 8, 6])
-        XCTAssertTrue(videos.isEmpty)
+        XCTAssertTrue(result.videos.isEmpty)
+        XCTAssertTrue(result.singles.isEmpty)
 
         // Shot 1: default fixed timing + a grade with LUT + grain.
         var graded = shots[0]

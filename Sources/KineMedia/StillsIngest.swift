@@ -56,9 +56,31 @@ public struct StillsIngest: Sendable {
                 }
             }
         }
+        stills = Self.collapseRawJpegPairs(stills)
         stills.sort { $0.path < $1.path }
         videos.sort { $0.path < $1.path }
         return FolderScan(stills: stills, videos: videos)
+    }
+
+    /// Cameras writing RAW+JPEG drop two files per shutter press
+    /// (DSC01234.ARW + DSC01234.JPG). Collapse each same-directory
+    /// basename pair to one still, preferring the RAW.
+    static func collapseRawJpegPairs(_ stills: [URL]) -> [URL] {
+        let jpegExts: Set<String> = ["jpg", "jpeg", "heic", "heif"]
+        var byKey: [String: URL] = [:]
+        var order: [String] = []
+        for url in stills {
+            let key = url.deletingPathExtension().path.lowercased()
+            if let existing = byKey[key] {
+                let existingIsJpeg = jpegExts.contains(existing.pathExtension.lowercased())
+                let newIsRaw = !jpegExts.contains(url.pathExtension.lowercased())
+                if existingIsJpeg && newIsRaw { byKey[key] = url }
+            } else {
+                byKey[key] = url
+                order.append(key)
+            }
+        }
+        return order.compactMap { byKey[$0] }
     }
 
     /// Read one still's capture time + pixel size without decoding pixels.
@@ -83,9 +105,17 @@ public struct StillsIngest: Sendable {
                let dateString = exif[kCGImagePropertyExifDateTimeOriginal] as? String,
                let base = Self.exifFormatter.date(from: dateString) {
                 var t = base.timeIntervalSince1970
-                if let subsec = exif[kCGImagePropertyExifSubsecTimeOriginal] as? String,
-                   let fraction = Double("0.\(subsec.trimmingCharacters(in: .whitespaces))") {
-                    t += fraction
+                // Subsec fallback chain — cameras disagree on which tag
+                // they fill (X-Pro2 writes none at all).
+                let subsecTags = [kCGImagePropertyExifSubsecTimeOriginal,
+                                  kCGImagePropertyExifSubsecTimeDigitized,
+                                  kCGImagePropertyExifSubsecTime]
+                for tag in subsecTags {
+                    if let subsec = exif[tag] as? String,
+                       let fraction = Double("0.\(subsec.trimmingCharacters(in: .whitespaces))") {
+                        t += fraction
+                        break
+                    }
                 }
                 captureTime = t
             }
@@ -98,17 +128,34 @@ public struct StillsIngest: Sendable {
         return StillFrame(url: url, captureTime: captureTime ?? 0, pixelSize: pixelSize)
     }
 
-    /// Full ingest: scan → probe every still → group by capture gap.
-    /// Shots are named `<folder>_S001`, `_S002`, … in capture order.
-    public func ingest(folder: URL, gapThreshold: TimeInterval) -> (shots: [BurstShot], videos: [URL]) {
+    public struct IngestResult: Sendable {
+        public var shots: [BurstShot]
+        /// Stills whose capture-gap group fell below `minBurstCount` —
+        /// one-offs, not bursts. Kept aside so they can be pruned to a
+        /// separate folder instead of polluting the shot list.
+        public var singles: [StillFrame]
+        public var videos: [URL]
+    }
+
+    /// Full ingest: scan → probe every still → group by capture gap →
+    /// split real bursts from singles. Shots are named `<folder>_S001`,
+    /// `_S002`, … in capture order.
+    public func ingest(folder: URL, gapThreshold: TimeInterval, minBurstCount: Int = 3) -> IngestResult {
         let scanResult = scan(folder)
         let frames = scanResult.stills.map { probeStill($0) }
         let groups = BurstGrouper.group(frames, gapThreshold: gapThreshold)
+        let floor = max(1, minBurstCount)
         let base = folder.deletingPathExtension().lastPathComponent
-        let shots = groups.enumerated().map { (i, group) in
-            BurstShot(name: String(format: "%@_S%03d", base, i + 1), frames: group)
+        var shots: [BurstShot] = []
+        var singles: [StillFrame] = []
+        for group in groups {
+            if group.count >= floor {
+                shots.append(BurstShot(name: String(format: "%@_S%03d", base, shots.count + 1), frames: group))
+            } else {
+                singles.append(contentsOf: group)
+            }
         }
-        return (shots, scanResult.videos)
+        return IngestResult(shots: shots, singles: singles, videos: scanResult.videos)
     }
 
     /// EXIF "yyyy:MM:dd HH:mm:ss" in the local timezone. EXIF carries no

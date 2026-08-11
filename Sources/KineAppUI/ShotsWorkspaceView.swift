@@ -85,6 +85,20 @@ struct ShotsWorkspaceView: View {
                 }
             }
 
+            barMenu(title: "Min burst", value: "\(workspace.project.settings.burst.minBurstCount)+") {
+                ForEach([2, 3, 4, 5, 8], id: \.self) { n in
+                    Button {
+                        workspace.setMinBurstCount(n)
+                    } label: {
+                        if workspace.project.settings.burst.minBurstCount == n {
+                            Label("\(n)+ stills", systemImage: "checkmark")
+                        } else {
+                            Text("\(n)+ stills")
+                        }
+                    }
+                }
+            }
+
             Spacer()
 
             if workspace.importing {
@@ -137,17 +151,64 @@ struct ShotsWorkspaceView: View {
         String(format: gap < 1 ? "%.1f s" : "%.0f s", gap)
     }
 
-    // MARK: - Shot grid
+    // MARK: - Shot grid (sectioned by capture day)
+
+    private struct DaySection: Identifiable {
+        let id: String
+        let title: String
+        let shots: [BurstShot]
+    }
+
+    private var daySections: [DaySection] {
+        let calendar = Calendar.current
+        let keyed = Dictionary(grouping: workspace.orderedShots) { shot -> Date in
+            let t = shot.frames.first?.captureTime ?? 0
+            return calendar.startOfDay(for: Date(timeIntervalSince1970: t))
+        }
+        return keyed.keys.sorted().map { day in
+            let shots = keyed[day]!.sorted { ($0.frames.first?.captureTime ?? 0) < ($1.frames.first?.captureTime ?? 0) }
+            return DaySection(id: Self.dayFormatter.string(from: day),
+                              title: Self.dayFormatter.string(from: day),
+                              shots: shots)
+        }
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d yyyy"
+        return f
+    }()
 
     private var shotGrid: some View {
         ThinScrollView(axis: .vertical) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 320, maximum: 480), spacing: 12)],
-                      alignment: .leading, spacing: 12) {
-                ForEach(workspace.orderedShots) { shot in
-                    ShotCard(workspace: workspace, shot: shot)
+            LazyVStack(alignment: .leading, spacing: 6) {
+                ForEach(daySections) { section in
+                    HStack(spacing: 8) {
+                        Text(section.title.uppercased())
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(KineTheme.accent)
+                        Text("\(section.shots.count) shot\(section.shots.count == 1 ? "" : "s") · \(section.shots.reduce(0) { $0 + $1.frames.count }) stills")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                        Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320, maximum: 480), spacing: 12)],
+                              alignment: .leading, spacing: 12) {
+                        ForEach(section.shots) { shot in
+                            ShotCard(workspace: workspace, shot: shot)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                }
+                if !workspace.project.mediaPool.singles.isEmpty {
+                    SinglesSection(workspace: workspace)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 12)
                 }
             }
-            .padding(14)
+            .padding(.vertical, 8)
         }
         .overlay(alignment: .bottom) {
             if dropTargeted {
@@ -222,6 +283,74 @@ struct ShotsWorkspaceView: View {
             workspace.ingest(urls: urls)
         }
         return true
+    }
+}
+
+// MARK: - Singles (non-burst stills)
+
+/// Stills that didn't make a burst: counted, previewed lightly, and
+/// prunable to a separate folder on disk so the burst folders stay clean.
+private struct SinglesSection: View {
+    @ObservedObject var workspace: WorkspaceModel
+    @State private var thumbs: [CGImage] = []
+    @State private var thumbedCount = -1
+
+    private static let previewCap = 14
+
+    var body: some View {
+        let singles = workspace.project.mediaPool.singles
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("SINGLES — NOT A BURST")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("\(singles.count) stills")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Move to Folder…") { workspace.pruneSinglesToFolder() }
+                    .font(.system(size: 10))
+                Button("Reveal in Finder") { workspace.revealSinglesInFinder() }
+                    .font(.system(size: 10))
+                Button("Remove from Project") { workspace.removeSinglesFromProject() }
+                    .font(.system(size: 10))
+            }
+            HStack(spacing: 4) {
+                ForEach(Array(thumbs.enumerated()), id: \.offset) { _, img in
+                    Image(decorative: img, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 56, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                }
+                if singles.count > Self.previewCap {
+                    Text("+\(singles.count - Self.previewCap)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 56, height: 40)
+                        .background(Color.black.opacity(0.3))
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                }
+            }
+            Text("Loose one-offs below the min-burst threshold. Move them out to keep the burst folders clean.")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onAppear { refreshThumbs(singles) }
+        .onChange(of: singles.count) { _, _ in refreshThumbs(singles) }
+    }
+
+    private func refreshThumbs(_ singles: [StillFrame]) {
+        guard thumbedCount != singles.count else { return }
+        thumbedCount = singles.count
+        let urls = singles.prefix(Self.previewCap).map(\.url)
+        Task.detached(priority: .utility) {
+            let images = urls.compactMap { StillDecoder.preview(url: $0, maxPixel: 120) }
+            await MainActor.run { thumbs = images }
+        }
     }
 }
 

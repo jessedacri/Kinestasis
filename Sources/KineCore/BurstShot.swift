@@ -160,24 +160,63 @@ public struct BurstDefaults: Codable, Sendable, Hashable {
     /// separate shots.
     public var gapThreshold: TimeInterval
     public var timing: ShotTimingMode
+    /// A capture-gap group needs at least this many stills to count as a
+    /// burst; smaller groups are singles (one-offs), kept aside for
+    /// pruning rather than becoming shots.
+    public var minBurstCount: Int
 
-    public static let `default` = BurstDefaults(gapThreshold: 2.0, timing: .default)
+    public static let `default` = BurstDefaults(gapThreshold: 2.0, timing: .default, minBurstCount: 3)
 
-    public init(gapThreshold: TimeInterval, timing: ShotTimingMode) {
+    public init(gapThreshold: TimeInterval, timing: ShotTimingMode, minBurstCount: Int = 3) {
         self.gapThreshold = gapThreshold
         self.timing = timing
+        self.minBurstCount = minBurstCount
+    }
+
+    private enum CodingKeys: String, CodingKey { case gapThreshold, timing, minBurstCount }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        gapThreshold = try c.decode(TimeInterval.self, forKey: .gapThreshold)
+        timing = try c.decode(ShotTimingMode.self, forKey: .timing)
+        minBurstCount = try c.decodeIfPresent(Int.self, forKey: .minBurstCount) ?? 3
     }
 }
 
 // MARK: - Grouping
 
 public enum BurstGrouper {
+    /// Cameras without sub-second EXIF (X-Pro2 and other older bodies)
+    /// stamp whole seconds, so an 8 fps burst reads as piles of identical
+    /// timestamps — which would make as-shot cadence collapse them.
+    /// Spread each run of equal timestamps evenly across its second so
+    /// cadence still means something. Input must be sorted by time.
+    public static func spreadEqualTimestamps(_ frames: [StillFrame]) -> [StillFrame] {
+        guard frames.count > 1 else { return frames }
+        var out = frames
+        var runStart = 0
+        for i in 1...frames.count {
+            if i == frames.count || frames[i].captureTime != frames[runStart].captureTime {
+                let runLength = i - runStart
+                if runLength > 1 {
+                    for k in 0..<runLength {
+                        out[runStart + k].captureTime += Double(k) / Double(runLength)
+                    }
+                }
+                runStart = i
+            }
+        }
+        return out
+    }
+
     /// Split stills into shots wherever the capture-time gap exceeds
     /// `gapThreshold`. Input order doesn't matter; output shots and the
-    /// frames within them are sorted by capture time.
+    /// frames within them are sorted by capture time. Runs of identical
+    /// whole-second timestamps are spread (see `spreadEqualTimestamps`).
     public static func group(_ frames: [StillFrame], gapThreshold: TimeInterval) -> [[StillFrame]] {
         guard !frames.isEmpty else { return [] }
-        let sorted = frames.sorted { ($0.captureTime, $0.url.path) < ($1.captureTime, $1.url.path) }
+        let sorted = spreadEqualTimestamps(
+            frames.sorted { ($0.captureTime, $0.url.path) < ($1.captureTime, $1.url.path) })
         var shots: [[StillFrame]] = []
         var current: [StillFrame] = [sorted[0]]
         for frame in sorted.dropFirst() {
