@@ -171,8 +171,13 @@ public struct BurstShot: Codable, Sendable, Identifiable {
     /// One-click exclusion from batch export / assembly without removing
     /// the shot.
     public var includeInExport: Bool
+    /// Stills trimmed off the head / tail. Playback, stats, and export
+    /// all use `effectiveFrames`; the underlying frames stay so trims are
+    /// non-destructive and re-adjustable.
+    public var trimIn: Int
+    public var trimOut: Int
 
-    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = [], useJpegSource: Bool = false, includeInExport: Bool = true) {
+    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = [], useJpegSource: Bool = false, includeInExport: Bool = true, trimIn: Int = 0, trimOut: Int = 0) {
         self.id = id
         self.name = name
         self.frames = frames
@@ -181,9 +186,11 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         self.speedRamp = speedRamp
         self.useJpegSource = useJpegSource
         self.includeInExport = includeInExport
+        self.trimIn = trimIn
+        self.trimOut = trimOut
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade, speedRamp, useJpegSource, includeInExport }
+    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade, speedRamp, useJpegSource, includeInExport, trimIn, trimOut }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -195,7 +202,19 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         speedRamp = try c.decodeIfPresent([CurvePoint].self, forKey: .speedRamp) ?? []
         useJpegSource = try c.decodeIfPresent(Bool.self, forKey: .useJpegSource) ?? false
         includeInExport = try c.decodeIfPresent(Bool.self, forKey: .includeInExport) ?? true
+        trimIn = try c.decodeIfPresent(Int.self, forKey: .trimIn) ?? 0
+        trimOut = try c.decodeIfPresent(Int.self, forKey: .trimOut) ?? 0
     }
+
+    /// The stills that actually play/export after head/tail trims. Always
+    /// keeps at least one still.
+    public var effectiveFrames: [StillFrame] {
+        let lo = min(max(0, trimIn), max(0, frames.count - 1))
+        let hi = max(lo + 1, frames.count - max(0, trimOut))
+        return Array(frames[lo..<min(hi, frames.count)])
+    }
+
+    public var isTrimmed: Bool { trimIn > 0 || trimOut > 0 }
 
     /// The file to decode for a frame, honoring the RAW/JPEG source toggle.
     public func sourceURL(for frame: StillFrame) -> URL {
@@ -413,9 +432,10 @@ public enum ShotTimingEngine {
         return events
     }
 
-    /// Full schedule for a shot: timing mode, then the speed ramp.
+    /// Full schedule for a shot: head/tail trim, timing mode, then the
+    /// speed ramp. Event `frameIndex` values index `shot.effectiveFrames`.
     public static func schedule(for shot: BurstShot, projectDefault: ShotTimingMode, rate: FrameRate) -> [StillEvent] {
-        let base = schedule(frames: shot.frames, mode: shot.timing(projectDefault: projectDefault), rate: rate)
+        let base = schedule(frames: shot.effectiveFrames, mode: shot.timing(projectDefault: projectDefault), rate: rate)
         return applyRamp(base, ramp: shot.speedRamp)
     }
 

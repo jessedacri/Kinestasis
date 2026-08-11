@@ -211,4 +211,23 @@ final class BurstShotTests: XCTestCase {
         XCTAssertEqual(events.count, 8, "no stills collapsed by whole-second timestamps")
         XCTAssertEqual(events.map(\.frameCount), [6, 6, 6, 6, 6, 6, 6, 6])
     }
+
+    // MARK: - Trim
+
+    func testEffectiveFramesRespectTrimAndKeepAtLeastOne() {
+        var shot = BurstShot(name: "S", frames: (0..<6).map { frame(Double($0)) })
+        shot.trimIn = 2; shot.trimOut = 1
+        XCTAssertEqual(shot.effectiveFrames.map(\.captureTime), [2.0, 3.0, 4.0])
+        XCTAssertTrue(shot.isTrimmed)
+        shot.trimIn = 99; shot.trimOut = 99
+        XCTAssertEqual(shot.effectiveFrames.count, 1, "never trims to nothing")
+    }
+
+    func testScheduleUsesTrimmedFrames() {
+        var shot = BurstShot(name: "S", frames: (0..<6).map { frame(Double($0)) })
+        shot.trimIn = 2; shot.trimOut = 2
+        let events = ShotTimingEngine.schedule(for: shot, projectDefault: .fixedFramesPerStill(frames: 3), rate: .twentyFour)
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(ShotTimingEngine.totalFrames(events), 6)
+    }
 }

@@ -56,7 +56,7 @@ struct ShotGradePanel: View {
                 workspace.prefetchPreviewFrames(for: shot)
                 rerenderPlayer(shot)
             }
-            .onChange(of: workspace.shotPlayheadFrame) { _, _ in rerenderPlayer(shot) }
+            .onReceive(workspace.shotTransport.$playheadFrame) { _ in rerenderPlayer(shot) }
             .onChange(of: workspace.previewVersion) { _, _ in rerenderPlayer(shot) }
             .onChange(of: shot.useJpegSource) { _, _ in rerenderPlayer(shot) }
         } else {
@@ -138,6 +138,32 @@ struct ShotGradePanel: View {
                 Text(String(format: "%.1fs", Double(total) / fps))
                     .font(KineTheme.monoSmall)
                     .foregroundStyle(KineTheme.textMuted)
+
+                Divider().frame(height: 12)
+
+                Button("I") { workspace.setShotTrimInAtPlayhead() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(KineTheme.accent)
+                    .help("Trim head to this still (key: I)")
+                Button("O") { workspace.setShotTrimOutAtPlayhead() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(KineTheme.accent)
+                    .help("Trim tail to this still (key: O)")
+                if shot.isTrimmed {
+                    Text("\(shot.effectiveFrames.count)/\(shot.frames.count)")
+                        .font(KineTheme.monoSmall)
+                        .foregroundStyle(KineTheme.textMuted)
+                    Button {
+                        workspace.clearShotTrim()
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear trim")
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -193,7 +219,7 @@ struct ShotGradePanel: View {
         let projectDefault = workspace.project.settings.burst.timing
         let mode = shot.timing(projectDefault: projectDefault)
         let rate = workspace.shotFrameRate
-        let schedule = ShotTimingEngine.schedule(for: shot, projectDefault: projectDefault, rate: rate)
+        let schedule = workspace.schedule(for: shot)
         let seconds = Double(ShotTimingEngine.totalFrames(schedule)) / rate.fps
         return VStack(alignment: .leading, spacing: 6) {
             Text("TIMING").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
@@ -217,8 +243,10 @@ struct ShotGradePanel: View {
                 }
                 .toggleStyle(.checkbox)
             }
-            Text(String(format: "%d stills · %@ · shot over %.1fs · plays %.1fs @ %@",
-                        shot.frames.count, shot.fileTypeLabel, shot.captureSpan, seconds, rate.rawValue))
+            Text(String(format: "%d stills%@ · %@ · shot over %.1fs · plays %.1fs @ %@",
+                        shot.frames.count,
+                        shot.isTrimmed ? " (trimmed to \(shot.effectiveFrames.count))" : "",
+                        shot.fileTypeLabel, shot.captureSpan, seconds, rate.rawValue))
                 .font(KineTheme.monoSmall)
                 .foregroundStyle(KineTheme.textMuted)
         }

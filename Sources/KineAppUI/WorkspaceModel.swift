@@ -271,6 +271,24 @@ public final class WorkspaceModel: ObservableObject {
 
     /// Non-nil while a shot batch export runs (0…1).
     @Published public var shotExportProgress: Double? = nil
+    /// What the progress bar is doing ("Exporting 12 shots…").
+    @Published public var shotBatchLabel: String? = nil
+
+    /// Thread-safe cancel flag shared with the off-main export loop.
+    final class CancelToken: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func cancel() { lock.lock(); value = true; lock.unlock() }
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    private var batchCancelToken: CancelToken?
+
+    /// Stop button target — cancels the running batch export/assembly
+    /// mid-shot; the exporter deletes its partial file.
+    public func cancelShotBatch() {
+        batchCancelToken?.cancel()
+        shotBatchLabel = "Stopping…"
+    }
 
     /// (probed, total) while a stills import runs — drives the live
     /// progress readout in the project bar.
@@ -3839,19 +3857,43 @@ public final class WorkspaceModel: ObservableObject {
         let exporter = BurstShotExporter()
         let directory = Self.renderedShotsDirectory
         let jobs: [(BurstShot, String)] = shots.map { ($0, "\($0.name)-\(renderHash(for: $0, rate: rate, defaults: defaults)).mov") }
+
+        // Never start a long render without saying what it is, where it
+        // writes, and roughly how big — and it's cancellable once running.
+        let toRender = jobs.filter { !FileManager.default.fileExists(atPath: directory.appendingPathComponent($0.1).path) }
+        if !toRender.isEmpty {
+            let stills = toRender.reduce(0) { $0 + $1.0.effectiveFrames.count }
+            let alert = NSAlert()
+            alert.messageText = "Render \(toRender.count) shot\(toRender.count == 1 ? "" : "s") for assembly?"
+            alert.informativeText =
+                "Assembly renders each included shot to a ProRes intermediate, then lays them on a timeline for trimming and a single-movie export.\n\n"
+                + "\(toRender.count) of \(shots.count) shots need rendering (\(stills) stills at native resolution — RAW sources can take a while). Already-rendered shots are reused.\n\n"
+                + "Intermediates: ~/Library/Application Support/Kinestasis/RenderedShots\n"
+                + "You can stop anytime with the \u{2715} next to the progress bar."
+            alert.addButton(withTitle: "Render & Assemble")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
         shotExportProgress = 0
+        shotBatchLabel = "Assembling \(shots.count) shot\(shots.count == 1 ? "" : "s")…"
+        let cancel = CancelToken()
+        batchCancelToken = cancel
 
         Task.detached(priority: .userInitiated) {
             var rendered: [(BurstShot, URL)] = []
             var failures: [String] = []
             for (i, job) in jobs.enumerated() {
+                if cancel.isCancelled { break }
                 let (shot, filename) = job
                 let url = directory.appendingPathComponent(filename)
                 if !FileManager.default.fileExists(atPath: url.path) {
                     do {
                         try exporter.export(shot: shot, mode: shot.timing(projectDefault: defaults),
                                             rate: rate, codec: .proRes422HQ,
-                                            to: directory, filename: filename)
+                                            to: directory, filename: filename,
+                                            isCancelled: { cancel.isCancelled })
+                        if cancel.isCancelled { break }
                     } catch {
                         failures.append("\(shot.name): \(error.localizedDescription)")
                         continue
@@ -3861,9 +3903,14 @@ public final class WorkspaceModel: ObservableObject {
                 let fraction = Double(i + 1) / Double(jobs.count)
                 await MainActor.run { self.shotExportProgress = fraction }
             }
+            let wasCancelled = cancel.isCancelled
             await MainActor.run {
                 self.shotExportProgress = nil
-                self.finishAssembly(rendered: rendered, rate: rate, failures: failures)
+                self.shotBatchLabel = nil
+                self.batchCancelToken = nil
+                if !wasCancelled {
+                    self.finishAssembly(rendered: rendered, rate: rate, failures: failures)
+                }
             }
         }
     }
@@ -4007,7 +4054,21 @@ public final class WorkspaceModel: ObservableObject {
         while shotFrameOrder.count > Self.shotFrameCap {
             shotFrameCache[shotFrameOrder.removeFirst()] = nil
         }
-        previewVersion += 1
+        bumpPreviewsCoalesced()
+    }
+
+    /// Coalesce previewVersion bumps: while a prefetch is landing dozens of
+    /// frames per second, publish at most ~7 Hz so the grid isn't
+    /// re-rendered per decode.
+    private var previewBumpScheduled = false
+    private func bumpPreviewsCoalesced() {
+        guard !previewBumpScheduled else { return }
+        previewBumpScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.previewBumpScheduled = false
+            self.previewVersion += 1
+        }
     }
 
     /// Warm the cache for a whole shot (first ~160 frames) so skim and
@@ -4042,16 +4103,89 @@ public final class WorkspaceModel: ObservableObject {
 
     // MARK: - Shot transport (spacebar / JKL on the selected shot)
 
+    /// High-frequency transport state lives on its OWN ObservableObject so
+    /// 24 Hz playhead ticks re-render only the player + the selected
+    /// card's overlay — never the whole shot grid (the scroll-chop fix).
+    @MainActor
+    public final class ShotTransport: ObservableObject {
+        @Published public var playheadFrame: Int64 = 0
+        @Published public var playRate: Double = 0
+    }
+
+    public let shotTransport = ShotTransport()
+
     /// Output-frame playhead within the selected shot's schedule.
-    @Published public var shotPlayheadFrame: Int64 = 0
+    public var shotPlayheadFrame: Int64 {
+        get { shotTransport.playheadFrame }
+        set { shotTransport.playheadFrame = newValue }
+    }
     /// 0 = stopped; ±1 / ±2 / ±4 = J-K-L style shuttle.
-    @Published public var shotPlayRate: Double = 0
+    public var shotPlayRate: Double {
+        get { shotTransport.playRate }
+        set { shotTransport.playRate = newValue }
+    }
     private var shotPlayTimer: Timer?
+
+    /// Cached schedule per shot — cards ask for this on every render, and
+    /// recomputing as-shot cadence for 200+ shots per frame is what made
+    /// scrolling chop. Key covers everything that changes the schedule.
+    private var scheduleCache: [ShotID: (key: Int, schedule: [StillEvent])] = [:]
+
+    public func schedule(for shot: BurstShot) -> [StillEvent] {
+        var hasher = Hasher()
+        hasher.combine(shot.timing(projectDefault: project.settings.burst.timing))
+        hasher.combine(shot.speedRamp)
+        hasher.combine(shotFrameRate)
+        hasher.combine(shot.frames.count)
+        hasher.combine(shot.trimIn)
+        hasher.combine(shot.trimOut)
+        let key = hasher.finalize()
+        if let cached = scheduleCache[shot.id], cached.key == key { return cached.schedule }
+        let schedule = ShotTimingEngine.schedule(
+            for: shot, projectDefault: project.settings.burst.timing, rate: shotFrameRate)
+        scheduleCache[shot.id] = (key, schedule)
+        return schedule
+    }
 
     public func scheduleForSelectedShot() -> [StillEvent] {
         guard let shot = selectedShot else { return [] }
-        return ShotTimingEngine.schedule(
-            for: shot, projectDefault: project.settings.burst.timing, rate: shotFrameRate)
+        return schedule(for: shot)
+    }
+
+    // MARK: - Per-shot trim (non-destructive head/tail)
+
+    /// Trim the head to the still under the playhead (kept).
+    public func setShotTrimInAtPlayhead() {
+        guard let shot = selectedShot,
+              let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
+        var updated = shot
+        updated.trimIn = min(shot.frames.count - 1, shot.trimIn + event.frameIndex)
+        updated.trimOut = min(updated.trimOut, shot.frames.count - 1 - updated.trimIn)
+        applyTrim(updated)
+    }
+
+    /// Trim the tail to the still under the playhead (kept).
+    public func setShotTrimOutAtPlayhead() {
+        guard let shot = selectedShot,
+              let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
+        var updated = shot
+        let absoluteIndex = shot.trimIn + event.frameIndex
+        updated.trimOut = max(0, shot.frames.count - 1 - absoluteIndex)
+        updated.trimIn = min(updated.trimIn, shot.frames.count - 1 - updated.trimOut)
+        applyTrim(updated)
+    }
+
+    public func clearShotTrim() {
+        guard var shot = selectedShot else { return }
+        shot.trimIn = 0; shot.trimOut = 0
+        applyTrim(shot)
+    }
+
+    private func applyTrim(_ shot: BurstShot) {
+        project.mediaPool.shots[shot.id] = shot
+        shotPlayheadFrame = 0
+        project.modifiedAt = Date()
+        markDirty()
     }
 
     public func toggleShotPlayback() {
@@ -4122,10 +4256,10 @@ public final class WorkspaceModel: ObservableObject {
     /// RAW/JPEG source toggle.
     public func currentShotFrameURL() -> URL? {
         guard let shot = selectedShot else { return nil }
-        let schedule = scheduleForSelectedShot()
-        guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule),
-              shot.frames.indices.contains(event.frameIndex) else { return nil }
-        return shot.sourceURL(for: shot.frames[event.frameIndex])
+        let frames = shot.effectiveFrames
+        guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)),
+              frames.indices.contains(event.frameIndex) else { return nil }
+        return shot.sourceURL(for: frames[event.frameIndex])
     }
 
     // MARK: - Shot filmstrip thumbnails
@@ -4147,7 +4281,7 @@ public final class WorkspaceModel: ObservableObject {
             await MainActor.run {
                 self.shotThumbnails[shotID] = images
                 self.shotThumbsInFlight.remove(shotID)
-                self.previewVersion += 1
+                self.bumpPreviewsCoalesced()
             }
         }
     }
@@ -4172,20 +4306,26 @@ public final class WorkspaceModel: ObservableObject {
         let rate = shotFrameRate
         let exporter = BurstShotExporter()
         shotExportProgress = 0
+        shotBatchLabel = "Exporting \(shots.count) shot\(shots.count == 1 ? "" : "s") to \(directory.lastPathComponent)…"
+        let cancel = CancelToken()
+        batchCancelToken = cancel
 
         let batchName = directory.lastPathComponent
         Task.detached(priority: .userInitiated) {
             var failures: [String] = []
             var sidecarEntries: [ShotBatchXMLSidecar.Entry] = []
             for (i, shot) in shots.enumerated() {
+                if cancel.isCancelled { break }
                 do {
                     let movieURL = try exporter.export(
                         shot: shot,
                         mode: shot.timing(projectDefault: defaults),
                         rate: rate,
                         codec: codec,
-                        to: directory
+                        to: directory,
+                        isCancelled: { cancel.isCancelled }
                     )
+                    if cancel.isCancelled { break }
                     let schedule = ShotTimingEngine.schedule(for: shot, projectDefault: defaults, rate: rate)
                     let size = shot.frames.first?.pixelSize ?? PixelSize(width: 1920, height: 1080)
                     sidecarEntries.append(ShotBatchXMLSidecar.Entry(
@@ -4199,7 +4339,7 @@ public final class WorkspaceModel: ObservableObject {
                 let fraction = Double(i + 1) / Double(shots.count)
                 await MainActor.run { self.shotExportProgress = fraction }
             }
-            if !sidecarEntries.isEmpty {
+            if !sidecarEntries.isEmpty && !cancel.isCancelled {
                 do {
                     _ = try ShotBatchXMLSidecar().write(
                         entries: sidecarEntries, rate: rate, to: directory, batchName: batchName)
@@ -4209,6 +4349,8 @@ public final class WorkspaceModel: ObservableObject {
             }
             await MainActor.run {
                 self.shotExportProgress = nil
+                self.shotBatchLabel = nil
+                self.batchCancelToken = nil
                 if !failures.isEmpty {
                     let alert = NSAlert()
                     alert.messageText = "Some shots failed to export"

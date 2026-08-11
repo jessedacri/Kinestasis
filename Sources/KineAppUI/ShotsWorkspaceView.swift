@@ -116,15 +116,27 @@ struct ShotsWorkspaceView: View {
 
             if let progress = workspace.shotExportProgress {
                 ProgressView(value: progress).controlSize(.small).frame(width: 110)
-                Text("Rendering…").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(workspace.shotBatchLabel ?? "Rendering…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Button {
+                    workspace.cancelShotBatch()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Stop rendering")
             } else if !workspace.orderedShots.isEmpty {
                 Button {
                     workspace.assembleShots()
                 } label: {
-                    Label("Assemble", systemImage: "timeline.selection")
+                    Label("Assemble…", systemImage: "timeline.selection")
                         .font(.system(size: 11, weight: .semibold))
                 }
-                .help("Render the included shots and lay them on a timeline for trimming")
+                .help("Render the included shots to ProRes intermediates, then lay them on a timeline for trimming — asks before starting")
 
                 let included = workspace.exportableShots.count
                 Menu {
@@ -190,7 +202,7 @@ struct ShotsWorkspaceView: View {
     }()
 
     private var shotGrid: some View {
-        ThinScrollView(axis: .vertical) {
+        ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(daySections) { section in
                     HStack(spacing: 8) {
@@ -296,6 +308,24 @@ struct ShotsWorkspaceView: View {
     }
 }
 
+/// The only view that observes the shot transport at playback rate.
+private struct TransportPlayheadLine: View {
+    @ObservedObject var transport: WorkspaceModel.ShotTransport
+    let total: Int64
+    let width: CGFloat
+
+    var body: some View {
+        if total > 1 {
+            let fraction = Double(transport.playheadFrame) / Double(total - 1)
+            Rectangle()
+                .fill(Color.white)
+                .frame(width: 1.5, height: 88)
+                .shadow(color: .black.opacity(0.6), radius: 1)
+                .offset(x: CGFloat(max(0, min(1, fraction))) * width - 0.75)
+        }
+    }
+}
+
 // MARK: - Singles (non-burst stills)
 
 /// Stills that didn't make a burst: counted, previewed lightly, and
@@ -385,7 +415,7 @@ private struct ShotCard: View {
     @State private var hoverFraction: Double? = nil
 
     private var schedule: [StillEvent] {
-        ShotTimingEngine.schedule(for: shot, projectDefault: workspace.project.settings.burst.timing, rate: rate)
+        workspace.schedule(for: shot)
     }
 
     /// Frame under the skim cursor (or the transport playhead when this
@@ -475,11 +505,7 @@ private struct ShotCard: View {
     /// full-bleed; otherwise the filmstrip.
     @ViewBuilder private var stripOrSkimFrame: some View {
         let images = workspace.shotThumbnails[shot.id] ?? []
-        let liveURL: URL? = {
-            if let f = hoverFraction { return skimURL(fraction: f) }
-            if isSelected && workspace.shotPlayRate != 0 { return workspace.currentShotFrameURL() }
-            return nil
-        }()
+        let liveURL: URL? = hoverFraction.flatMap { skimURL(fraction: $0) }
         if let liveURL, let frame = workspace.cachedPreviewFrame(liveURL) {
             GeometryReader { geo in
                 Image(decorative: frame, scale: 1)
@@ -497,19 +523,18 @@ private struct ShotCard: View {
     }
 
     @ViewBuilder private func playheadLine(width: CGFloat) -> some View {
-        let fraction: Double? = {
-            if let f = hoverFraction { return f }
-            guard isSelected else { return nil }
-            let total = ShotTimingEngine.totalFrames(schedule)
-            guard total > 1 else { return nil }
-            return Double(workspace.shotPlayheadFrame) / Double(total - 1)
-        }()
-        if let fraction {
+        if let fraction = hoverFraction {
             Rectangle()
                 .fill(Color.white)
                 .frame(width: 1.5, height: 88)
                 .shadow(color: .black.opacity(0.6), radius: 1)
                 .offset(x: CGFloat(fraction) * width - 0.75)
+        } else if isSelected {
+            // Transport-driven line in its own subview: 24 Hz playback
+            // ticks re-render only this overlay, never the card/grid.
+            TransportPlayheadLine(transport: workspace.shotTransport,
+                                  total: ShotTimingEngine.totalFrames(schedule),
+                                  width: width)
         }
     }
 

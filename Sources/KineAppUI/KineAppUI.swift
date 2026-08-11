@@ -233,6 +233,12 @@ public struct KineRootView: View {
                 case String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)):
                     workspace.shotStepFrames(isShift ? 10 : 1)
                     return nil
+                case "i":
+                    if isOption { workspace.clearShotTrim() } else { workspace.setShotTrimInAtPlayhead() }
+                    return nil
+                case "o":
+                    if isOption { workspace.clearShotTrim() } else { workspace.setShotTrimOutAtPlayhead() }
+                    return nil
                 default:
                     break
                 }

@@ -64,20 +64,21 @@ public struct BurstShotExporter: Sendable {
         progress: @Sendable (Double) -> Void = { _ in }
     ) throws -> URL {
         let gradeRenderer = shot.grade.isIdentity ? nil : ShotGradeRenderer()
+        let frames = shot.effectiveFrames
         let schedule = ShotTimingEngine.applyRamp(
-            ShotTimingEngine.schedule(frames: shot.frames, mode: mode, rate: rate),
+            ShotTimingEngine.schedule(frames: frames, mode: mode, rate: rate),
             ramp: shot.speedRamp)
-        guard !schedule.isEmpty, !shot.frames.isEmpty else { throw ExportError.emptyShot }
+        guard !schedule.isEmpty, !frames.isEmpty else { throw ExportError.emptyShot }
 
         // Native input resolution from the first still (probe if the
         // ingest pass didn't record it). Even dimensions for the encoder.
         let nativeSize: PixelSize
-        if let s = shot.frames[schedule[0].frameIndex].pixelSize ?? shot.frames.first?.pixelSize {
+        if let s = frames[schedule[0].frameIndex].pixelSize ?? frames.first?.pixelSize {
             nativeSize = s
-        } else if let img = StillDecoder.decode(url: shot.sourceURL(for: shot.frames[0]), maxPixel: 100_000) {
+        } else if let img = StillDecoder.decode(url: shot.sourceURL(for: frames[0]), maxPixel: 100_000) {
             nativeSize = PixelSize(width: img.width, height: img.height)
         } else {
-            throw ExportError.stillDecodeFailed(shot.frames[0].url)
+            throw ExportError.stillDecodeFailed(frames[0].url)
         }
         let width = nativeSize.width - (nativeSize.width % 2)
         let height = nativeSize.height - (nativeSize.height % 2)
@@ -125,7 +126,7 @@ public struct BurstShotExporter: Sendable {
                 try? FileManager.default.removeItem(at: outputURL)
                 return outputURL
             }
-            let stillURL = shot.sourceURL(for: shot.frames[event.frameIndex])
+            let stillURL = shot.sourceURL(for: frames[event.frameIndex])
             let maxEdge = max(nativeSize.width, nativeSize.height)
             let ev = ExposureWobble.evOffset(
                 outputFrame: event.startFrame, fps: rate.fps,
