@@ -1,96 +1,64 @@
-# Preem — Developer Guide
+# Kinestasis — Developer Guide
 
 ## What This Is
 
-Preem is a macOS-native non-linear video editor targeting eventual Adobe Premiere Pro feature parity, with a differentiator on ingest-time organization (slate OCR, shot-type detection, transcription) and tight integration with the Polymerge audio engine.
+Kinestasis is a macOS app that turns burst-mode photo sets into video clips. Drag in a folder of stills (JPEG + OEM RAW); the app groups them into shots by capture-time gaps, previews them as draggable filmstrips, applies per-clip cadence (frames-per-still / as-shot timing / frame-skip), camera-raw-style grades, LUTs, film grain, and batch-exports ProRes clips at native resolution plus XML for NLE handoff. The signature aesthetic: 8–12 fps stills cadence, silent-film feel.
 
-**Target users:** Independent filmmakers, documentary editors, production sound mixers who edit, anyone who values metadata-driven org over chasing Hollywood-tier color/VFX.
-**Reference NLEs:** Premiere Pro, DaVinci Resolve, Final Cut Pro.
+Forked from Preem (the macOS NLE, `~/Preem`) on 2026-08-10 per `WCID-WORKORDER.md` — same layered engine, pointed at a different product. The NLE ambition stays parked in Preem.
+
+**Video compatibility (Jesse, 2026-08-10):** users may drop video files into a burst folder and expect them interpreted with the same look/feel as stills. AVFoundation video ingest (MOV/MP4/M4V — probe, thumbnails, skim, audio, playback) is retained; a video file becomes a shot alongside still-groups and shares the grade/grain pipeline. Only Preem's MXF-specific native demuxer path and the ML module (slate OCR / shot classifier / transcription) were pruned.
 
 ## Tech Stack
 
-- **Language:** Swift 5.10+ (moving to Swift 6 strict concurrency as targets stabilize)
-- **UI:** SwiftUI for inspectors / bins / viewers; AppKit `NSView` + Metal for the timeline (SwiftUI can't hit the data density an NLE timeline needs)
-- **Build:** Swift Package Manager monorepo (`Package.swift`, no `.xcodeproj`)
-- **Frameworks:** Metal / MetalKit / MetalFX / MetalPerformanceShaders, VideoToolbox, AVFoundation, Vision, Core ML, Speech, Accelerate (vDSP / vImage), Core Audio
-- **Platform:** macOS 14.0+ (Apple Silicon first-class; Intel best-effort)
+- **Language:** Swift 5.10+ • **UI:** SwiftUI panels; AppKit `NSView` + Metal for the timeline
+- **Build:** SPM monorepo (`Package.swift`, no `.xcodeproj`)
+- **Frameworks:** Metal/MetalKit, VideoToolbox, AVFoundation, ImageIO + CIRAWFilter (RAW decode), Core Image, Accelerate, Core Audio
+- **Platform:** macOS 14.0+, Apple Silicon first-class
 
 ## Building & Running
 
 ```bash
-swift build          # compile all targets
-swift run Preem      # launch the app
-swift test           # run test suite
+swift build              # compile all targets
+swift run Kinestasis     # launch the app
+swift test               # run test suite
 ```
 
-Release builds (`swift build -c release` / `swift run -c release Preem`) are required for any real footage work — Metal shader compile + VideoToolbox sessions are tuned for optimized builds.
+Release builds (`-c release`) required for real-footage work — Metal shader compile + VideoToolbox are tuned for optimized builds.
 
 ## Module Layout
 
 ```
 Sources/
-├── PreemCore/         # pure data: Project, Sequence, Track, Clip, TimeRange, IDs
-├── PreemMedia/        # AVFoundation/VideoToolbox wrappers, VT session pool, proxy mgr
-├── PreemRender/       # Metal compositor, render graph, color pipeline
-├── PreemEffects/      # starter effect arsenal: xfade, HPF/LPF, transform, opacity, …
-├── PreemML/           # Vision (slate OCR), Core ML (shot classifier), Speech (transcription)
-├── PreemTimelineUI/   # AppKit NSView timeline + tools (select, blade, pen, slip)
-├── PreemAppUI/        # SwiftUI shells: bin browser, source viewer, program viewer, inspector
-└── PreemApp/          # @main, AppDelegate, window scenes
+├── KineCore/         # pure data: Project, Sequence, Track, Clip, TimeRange, IDs
+├── KineMedia/        # AVFoundation wrappers, probing, preview cache, project store
+├── KineRender/       # Metal compositor, render graph, color pipeline
+├── KineEffects/      # effect arsenal: xfade, transform, opacity, …
+├── KineTimelineUI/   # AppKit NSView timeline + tools
+├── KineAppUI/        # SwiftUI shells: bin browser, viewers, inspector, theme
+└── KineApp/          # @main, AppDelegate, window scenes
 ```
 
-Dependency rule: modules depend **upward only**. PreemCore depends on nothing. PreemApp depends on everything. No cycles. If you find yourself wanting a back-edge, the abstraction is in the wrong place.
+Dependency rule: modules depend **upward only**; no cycles.
 
-## Apple Silicon — what runs where
+## PolymergeKit
 
-| Subsystem | Path | Notes |
-|---|---|---|
-| H.264/HEVC decode/encode | VideoToolbox Media Engine | Parallel sessions across multiple engines on Pro/Max/Ultra |
-| ProRes decode/encode | VideoToolbox ProRes Engine | M1 Pro+; primary export codec |
-| Compositor + effects | Metal (custom shaders) | Zero-copy `CVPixelBuffer` → `MTLTexture` via `CVMetalTextureCache` |
-| Color / scopes | MPSGraph + custom shaders | Waveform, vectorscope, parade |
-| Proxy ↔ full-res scaling | MetalFX (spatial + temporal) | |
-| Slate OCR / shot / transcription | Core ML on ANE | `MLComputeUnits.all` |
-| Audio DSP | Accelerate vDSP | Re-use Polymerge primitives |
-
-See `docs/APPLE-SILICON.md` for the deep dive.
-
-## Polymerge — shared via PolymergeKit (fork retired 2026-07-12)
-
-Polymerge's four Preem-relevant modules were originally forked into Preem's source tree on 2026-05-27. On 2026-07-12 the fork was retired: Preem's post-fork improvements (async MXF decode pipeline, cached KLV index, `MXFAudioReader`, renderer first-frame callback) were backported upstream, and the modules were extracted to the sibling package **PolymergeKit** (`/Users/jessedacri/PolymergeKit`, its own git repo) that BOTH Preem and Polymerge consume via a local-path SPM dependency (`.package(path: "../PolymergeKit")`). There is exactly one copy of these modules now; improvements land in the Kit once and reach both apps.
-
-Kit modules consumed by Preem:
-
-- `PolymergeMediaModel` — `AudioFile`, `VideoFile`, `TimecodeValue`, DSP primitives (`HighPassFilter`, `PhaseTrajectory`, `LTCDecoder`, etc.)
-- `PolymergeIngest` — WAV/BEXT/iXML parsers, MXF essence/picture/sound/timecode readers
-- `PolymergeAudio` — `AudioPlaybackEngine`, `TrackBuffer`, `TrackBufferBuilder`, `LoudnessAnalyzer`, `MixLoudnessMeasurer`, `SampleRateConverter`, `SincInterpolator`, `TimecodeAligner`, `WaveformTCInferrer`, `VideoAudioExtractor`, `GCCPHATAnalyzer`
-- `PolymergePlayback` — PPE (`CustomVideoPlayer`, `PPEMetalRenderer`, `PPEFrameQueue`, `PPEBackgroundDecoder`, `AVAssetFrameSource`, `MXFFrameSource`, `PPELUTLoader`, `VideoFrameSource`) + legacy video players + `VideoFileParser`
-
-`PolymergePhaseAlign` (phase alignment / STFT) also lives in the Kit but Preem does not depend on that product.
-
-Module names keep the `Polymerge` prefix — Preem source files still `import PolymergePlayback`, etc. Dependency direction is strictly downward: Kit modules have no app deps; Preem* modules consume Kit products freely. Library changes are committed in the Kit repo; after changing the Kit, build Preem AND run `swift test` in `../polymerge` (the shared test suite lives there) so a change never breaks the other consumer silently. NLE-specific needs go in the Kit as additive public API, or in a Preem module on top.
+Shared media-engine package at `../PolymergeKit` (own git repo), consumed via local-path SPM dep by PolyMerge, Preem, and Kinestasis. Products used: `PolymergeMediaModel`, `PolymergeIngest`, `PolymergeAudio`, `PolymergePlayback`. Library changes are committed in the Kit repo — after changing the Kit, build this app AND run `swift test` in `../polymerge` so a change never breaks another consumer silently. No PolymergeKit API breaks; Kinestasis-specific needs go in the Kit as additive public API or in a Kine module on top.
 
 ## Conventions
 
 - One feature per PR. Small surface area beats heroic megacommits.
-- Test what's deterministic (data model, time math, project file). Don't test what depends on a GPU or codec — those go through manual smoke runs.
-- No multi-paragraph docstrings. One short line if absolutely needed; let names carry the meaning.
-- No `// added for X` / `// removed in Y` comments. The git log is the changelog.
-- Performance is a feature. Any code on the render path that allocates per-frame is a bug.
+- Test what's deterministic (data model, time math, grouping, project file). GPU/codec paths go through manual smoke runs.
+- No multi-paragraph docstrings; let names carry the meaning.
+- No `// added for X` comments — git log is the changelog.
+- Performance is a feature. Per-frame allocation on the render path is a bug.
 
-## Where to look next
+## Inherited docs
 
-- **`docs/HANDOFF.md`** — entry point for a new session. State pointer, what's next, footguns, file map.
-- `docs/USER-GUIDE.md` — the user-facing manual: import, editing, transforms, render, export, troubleshooting.
-- `docs/ARCHITECTURE.md` — load-bearing design decisions, module dependency graph, data model, render-graph philosophy, project file format.
-- `docs/TIMELINE.md` — every user-facing editing pattern: tools, keymap, focus model, drag/drop, snapping, selection types, V/A linking, no-overlap invariant, undo batching, frame quantization, zoom, preview cache, In/Out marks, target-tracks, splits, sequence settings.
-- `docs/BROWSER.md` — FCP-style media browser: filmstrip skimming, the still-vs-PPE source-viewer state machine, `SkimFrameProvider`, favorites (subclips) + filter, transport/marks routing.
-- `docs/COLOR.md` — Lumetri-style grading: Basic Correction + Curves, the color-managed per-layer pipeline (input/log transforms → linear → display), `ColorGrade` model, and the color-management roadmap.
-- `docs/BRANDING.md` — the Polymerge-sibling theme: `PreemTheme` palette, dark amber chrome, Dock icon, About panel, and the "don't brand the timeline waveforms" constraint.
-- `docs/COMPOSITOR.md` — runtime architecture: playback state machine, audio pipelines (timeline + source), **unified compositor** (realtime + render share one path), pre-render cache, transform/crop, transitions, timecode, Polymerge fork state.
-- `docs/ROADMAP.md` — milestones M1 → M6+.
-- `docs/APPLE-SILICON.md` — which API for which job, and why.
+`docs/` is inherited from Preem and still uses Preem-era names (Preem*, MXF, ML). Engine explanations (COMPOSITOR.md render invariants, TIMELINE.md editing model, COLOR.md pipeline) remain accurate for the shared machinery — read them for how things work, not for product scope. `docs/HANDOFF.md` state pointers describe Preem, not Kinestasis.
 
-## Quick state pointer
+## Work order & status
 
-M1 (ingest + viewer + ML pipelines + FCPXML media-pool export) and M2 (timeline editor + audio engine + transitions + FCPXML timeline export) are **functionally complete**. Most of M3 shipped across 2026-05-26 → 2026-05-28: pre-render cache + Export (ProRes 422 Proxy/LT/422/HQ/4444, H.264, HEVC, audio-only WAV/AIFF/AAC), unified realtime compositor (realtime ≡ render by construction), per-clip Transform + Crop, **keyframes with linear / hold / easeIn / easeOut / bezier interpolation** (Premiere-style — easing on the end keyframe decelerates INTO it), **Effect Controls inspector as a tab in the Source pane** with stopwatch toggles + keyframe strip (drag/double-click/right-click), **on-canvas direct manipulation** (center drag, corner uniform scale, edge non-uniform scale, top rotation grip), aspect-aware compositing with crop decoupled from aspect-fit + auto-feather, Final Cut–style **app lifecycle** (close-to-hide, dock reopen, save-warn on ⌘Q, frame autosave), foolproof transition delete (click body + Delete key), **custom slim chrome** (`ThinSlider` + `ThinScrollView` ignore macOS system scrollbar prefs). The app is a real NLE: import → cut → trim → blade → ripple-delete → drag-between-tracks → fade → cross-dissolve → animate transforms with keyframes → render In to Out → export to ProRes/H.264/HEVC. Across 2026-05-28/29 the project went under git and the **playback engine was hardened**: a full cleanliness/perf audit, then the playback-chop hunt — root cause was **frame-boundary source sampling** (sample 4 ms into the frame), plus frame-accurate WYSIWYG preview (playhead off `@Published`, CALayer playhead, wall-clock compose time), overlap-aware decoder keying (layer a clip over itself without thrash; seamless same-source cuts), cache-reader stall fix, and cache↔live frame-grid alignment. See `HANDOFF.md` (top) and `COMPOSITOR.md` ("Frame-exact playback invariants") — those invariants are load-bearing, don't regress them. The **FCP-style filmstrip bin** shipped 2026-05-29 (skimmable thumbnail filmstrips, In/Out on the skimmer, **F** favorites a `FavoriteRange` subclip, Favorites filter) — see `BROWSER.md`. **2026-05-30 → 06-04 shipped:** **Lumetri-style color grading** (Basic Correction + RGB curves + `.cube` LUT, color-managed per-layer compositor — `COLOR.md`); **native MXF** import + playback (video via pipelined async VT decode, native PCM audio with ranged/windowed decode + shared KLV index — `HANDOFF.md` MXF section); **Polymerge-sibling branding** (`PreemTheme` dark amber chrome, flipped Dock icon, About — `BRANDING.md`; the timeline rendering is deliberately left unbranded to preserve waveform legibility); and two timeline fixes (multi-select drag, ⌘F program fullscreen — `TIMELINE.md`); and **multi-track audio export** (export-sheet Audio→Tracks: Single mixdown / Separate Tracks / Separate Tracks preserving source channels; MOV only — `HANDOFF.md` multi-track section). **Git:** branding merged to `main` (`cb8e117`) on 2026-06-04; multi-track audio export is on `feature/multitrack-audio-export` — merge when happy. Remaining backlog in `HANDOFF.md`: merge multi-track audio + verify with real multicam footage; bin follow-ups; color (linear-light compositing, HDR, wheels/HSL secondary, scopes); MXF (Long-GOP seek, batched reads); cache↔live micro-hiccup; proxy pipeline; bezier handles; keymap presets; `.preem` package; render-graph fusion.
+`WCID-WORKORDER.md` (repo root) is the build plan: K1 ingest/grouping/timing/export → K2 grade → K3 motion/texture → K4 XML/assembly/DMG. Mark checkboxes there as tasks complete.
+
+## WCID
+After substantive work in this project, update `WCID.md` in this directory — it is how the WCID portfolio manager (~/WCID) tracks this project without crawling it.

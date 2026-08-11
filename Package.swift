@@ -1,7 +1,7 @@
 // swift-tools-version: 5.10
 import PackageDescription
 
-// Preem — macOS NLE.
+// Kinestasis — burst-mode stills → footage, macOS.
 //
 // Module layout is layered: low-level building blocks at the top, the app
 // shell at the bottom. Each module depends only on modules above it; no
@@ -10,36 +10,33 @@ import PackageDescription
 //   PolymergeKit        shared media-engine libraries (MediaModel, Ingest,
 //                       Audio, Playback), consumed via local-path dep from
 //                       ../PolymergeKit. Replaces the 2026-05-27 in-tree
-//                       fork: Preem's post-fork improvements were merged
-//                       upstream on 2026-07-12 and both apps now consume
-//                       the same package. Library changes go in the Kit
-//                       repo; verify with Polymerge's `swift test` too.
-//   PreemCore           pure data: Project, Sequence, Track, Clip, time
-//   PreemMedia          decode/encode + VT session pool + proxy manager
-//   PreemRender         Metal compositor + render graph
-//   PreemEffects        starter effect arsenal (xfade, HPF/LPF, transform, …)
-//   PreemML             slate OCR, shot classifier, transcription (ANE)
-//   PreemTimelineUI     AppKit NSView timeline + pen/blade/select tools
-//   PreemAppUI          SwiftUI shells: bins, viewer, inspector
-//   PreemApp            @main, AppDelegate, window scenes
+//                       fork. Library changes go in the Kit repo; verify
+//                       with Polymerge's `swift test` too.
+//   KineCore           pure data: Project, Sequence, Track, Clip, time
+//   KineMedia          decode/encode + VT session pool + proxy manager
+//   KineRender         Metal compositor + render graph
+//   KineEffects        starter effect arsenal (xfade, HPF/LPF, transform, …)
+//   KineTimelineUI     AppKit NSView timeline + pen/blade/select tools
+//   KineAppUI          SwiftUI shells: bins, viewer, inspector
+//   KineApp            @main, AppDelegate, window scenes
 
 let package = Package(
-    name: "Preem",
+    name: "Kinestasis",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "Preem", targets: ["PreemApp"]),
+        .executable(name: "Kinestasis", targets: ["KineApp"]),
     ],
     dependencies: [
         .package(path: "../PolymergeKit"),
     ],
     targets: [
-        // ── Preem ────────────────────────────────────────────────────
-        .target(name: "PreemCore"),
+        // ── Kinestasis ────────────────────────────────────────────────────
+        .target(name: "KineCore"),
 
         .target(
-            name: "PreemMedia",
+            name: "KineMedia",
             dependencies: [
-                "PreemCore",
+                "KineCore",
                 .product(name: "PolymergeMediaModel", package: "PolymergeKit"),
                 .product(name: "PolymergeIngest", package: "PolymergeKit"),
                 .product(name: "PolymergeAudio", package: "PolymergeKit"),
@@ -48,39 +45,33 @@ let package = Package(
         ),
 
         .target(
-            name: "PreemRender",
+            name: "KineRender",
             dependencies: [
-                "PreemCore",
-                "PreemMedia",
+                "KineCore",
+                "KineMedia",
                 .product(name: "PolymergePlayback", package: "PolymergeKit"),
             ],
             resources: [.process("Resources")]
         ),
 
         .target(
-            name: "PreemEffects",
-            dependencies: ["PreemCore", "PreemRender"]
+            name: "KineEffects",
+            dependencies: ["KineCore", "KineRender"]
         ),
 
         .target(
-            name: "PreemML",
-            dependencies: ["PreemCore", "PreemMedia"]
+            name: "KineTimelineUI",
+            dependencies: ["KineCore", "KineRender", "KineEffects"]
         ),
 
         .target(
-            name: "PreemTimelineUI",
-            dependencies: ["PreemCore", "PreemRender", "PreemEffects"]
-        ),
-
-        .target(
-            name: "PreemAppUI",
+            name: "KineAppUI",
             dependencies: [
-                "PreemCore",
-                "PreemMedia",
-                "PreemRender",
-                "PreemEffects",
-                "PreemML",
-                "PreemTimelineUI",
+                "KineCore",
+                "KineMedia",
+                "KineRender",
+                "KineEffects",
+                "KineTimelineUI",
                 .product(name: "PolymergeMediaModel", package: "PolymergeKit"),
                 .product(name: "PolymergeAudio", package: "PolymergeKit"),
                 .product(name: "PolymergePlayback", package: "PolymergeKit"),
@@ -88,29 +79,24 @@ let package = Package(
         ),
 
         .executableTarget(
-            name: "PreemApp",
-            dependencies: ["PreemAppUI"],
+            name: "KineApp",
+            dependencies: ["KineAppUI"],
             resources: [.process("Resources")]
         ),
 
         .testTarget(
-            name: "PreemCoreTests",
-            dependencies: ["PreemCore"]
+            name: "KineCoreTests",
+            dependencies: ["KineCore"]
         ),
 
         .testTarget(
-            name: "PreemMLTests",
-            dependencies: ["PreemML"]
+            name: "KineMediaTests",
+            dependencies: ["KineMedia"]
         ),
 
         .testTarget(
-            name: "PreemMediaTests",
-            dependencies: ["PreemMedia"]
-        ),
-
-        .testTarget(
-            name: "PreemRenderTests",
-            dependencies: ["PreemRender", "PreemCore"]
+            name: "KineRenderTests",
+            dependencies: ["KineRender", "KineCore"]
         ),
     ]
 )
