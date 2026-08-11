@@ -65,12 +65,15 @@ struct ShotExportSheet: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Picker("", selection: $codec) {
                         ForEach(BurstShotExporter.Codec.allCases, id: \.self) { c in
-                            Text(c.displayName).tag(c)
+                            Text(c.shortName).tag(c)
                         }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .controlSize(.small)
+                    Text(codec.displayName)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
                     .onChange(of: codec) { _, newCodec in
                         if newCodec.usesBitrate { bitrateMbps = newCodec.defaultBitrateMbps }
                     }
@@ -141,9 +144,10 @@ struct ShotExportSheet: View {
                     .disabled(destination == nil || shots.isEmpty)
             }
         }
-        .padding(18)
-        .frame(width: 440)
+        .padding(20)
+        .frame(width: 560)
         .background(KineTheme.bgPanel)
+        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder

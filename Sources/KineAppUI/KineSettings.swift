@@ -94,13 +94,14 @@ public struct KineSettingsView: View {
                     Text("Default length")
                     Spacer()
                     TextField(
-                        "frames",
+                        "",
                         value: Binding(
                             get: { settings.defaultTransitionFrames },
                             set: { settings.defaultTransitionFrames = max(1, $0) }
                         ),
                         format: .number
                     )
+                    .labelsHidden()
                     .frame(width: 60)
                     .multilineTextAlignment(.trailing)
                     Stepper(
@@ -119,7 +120,8 @@ public struct KineSettingsView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .background(KineTheme.bg)
-        .padding(20)
-        .frame(minWidth: 420, minHeight: 200)
+        .frame(width: 460, height: 200)
+        .preferredColorScheme(.dark)
+        .tint(KineTheme.accent)
     }
 }

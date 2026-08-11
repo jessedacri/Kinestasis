@@ -92,6 +92,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        // The whole app is dark chrome (pro-NLE convention). Forcing the
+        // appearance at the NSApp level covers every window AppKit makes
+        // for us: Settings, menus, context menus, popovers, open/save
+        // panels. Without this, system light mode rendered black text on
+        // our dark panels in windows outside the root view's
+        // preferredColorScheme.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
         // Dock icon (SPM executable has no .app bundle/Info.plist icon, so
         // set it at runtime). The mark: a burst card with amber motion
         // echoes, drawn on the standard 824/1024 icon grid so it sits at

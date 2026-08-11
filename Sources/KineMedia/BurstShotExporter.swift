@@ -45,6 +45,17 @@ public struct BurstShotExporter: Sendable {
             }
         }
 
+        /// Compact label for tight segmented controls.
+        public var shortName: String {
+            switch self {
+            case .proRes422:   return "422"
+            case .proRes422HQ: return "422 HQ"
+            case .proRes4444:  return "4444"
+            case .h264:        return "H.264"
+            case .hevc:        return "HEVC"
+            }
+        }
+
         public var usesBitrate: Bool { self == .h264 || self == .hevc }
         public var defaultBitrateMbps: Int { self == .h264 ? 50 : 30 }
 
