@@ -35,6 +35,41 @@ public enum ShotTimingMode: Codable, Sendable, Hashable {
     public static let `default` = ShotTimingMode.fixedFramesPerStill(frames: 3)
 }
 
+/// Camera-raw-style grade applied to every still in a shot. All scalar
+/// controls neutral at 0 (identity when untouched). RAW sources run
+/// exposure/WB in the CIRAWFilter develop stage; JPEG gets an equivalent
+/// Core Image chain.
+public struct ShotGrade: Codable, Sendable, Hashable {
+    public var exposure: Double      // stops, -5 … +5
+    public var contrast: Double      // -100 … +100
+    public var temperature: Double   // -100 (cool) … +100 (warm)
+    public var tint: Double          // -100 (green) … +100 (magenta)
+    public var highlights: Double    // -100 … +100
+    public var shadows: Double       // -100 … +100
+    public var saturation: Double    // -100 … +100
+    public var blackAndWhite: Bool
+    public var lutPath: String?
+    public var lutIntensity: Double  // 0 … 100
+
+    public static let identity = ShotGrade()
+
+    public init(exposure: Double = 0, contrast: Double = 0, temperature: Double = 0, tint: Double = 0,
+                highlights: Double = 0, shadows: Double = 0, saturation: Double = 0,
+                blackAndWhite: Bool = false, lutPath: String? = nil, lutIntensity: Double = 100) {
+        self.exposure = exposure; self.contrast = contrast
+        self.temperature = temperature; self.tint = tint
+        self.highlights = highlights; self.shadows = shadows
+        self.saturation = saturation; self.blackAndWhite = blackAndWhite
+        self.lutPath = lutPath; self.lutIntensity = lutIntensity
+    }
+
+    public var isIdentity: Bool {
+        exposure == 0 && contrast == 0 && temperature == 0 && tint == 0
+            && highlights == 0 && shadows == 0 && saturation == 0
+            && !blackAndWhite && (lutPath == nil || lutIntensity == 0)
+    }
+}
+
 /// A group of stills captured in one burst, playable as a clip.
 public struct BurstShot: Codable, Sendable, Identifiable {
     public var id: ShotID
@@ -43,12 +78,25 @@ public struct BurstShot: Codable, Sendable, Identifiable {
     public var frames: [StillFrame]
     /// nil → the project-wide default timing applies.
     public var timingOverride: ShotTimingMode?
+    public var grade: ShotGrade
 
-    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil) {
+    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity) {
         self.id = id
         self.name = name
         self.frames = frames
         self.timingOverride = timingOverride
+        self.grade = grade
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(ShotID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        frames = try c.decode([StillFrame].self, forKey: .frames)
+        timingOverride = try c.decodeIfPresent(ShotTimingMode.self, forKey: .timingOverride)
+        grade = try c.decodeIfPresent(ShotGrade.self, forKey: .grade) ?? .identity
     }
 
     public func timing(projectDefault: ShotTimingMode) -> ShotTimingMode {

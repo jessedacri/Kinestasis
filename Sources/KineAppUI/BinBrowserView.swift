@@ -309,6 +309,10 @@ private struct BurstShotRow: View {
                     workspace.setShotTiming(mode, for: shot.id)
                 }
             }
+            Button("Grade…") { workspace.selectShot(shot.id) }
+            Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
+            Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
+                .disabled(workspace.copiedShotGrade == nil)
             Menu("Export Shot") {
                 Button("ProRes 422 HQ…") { workspace.exportShots([shot.id], codec: .proRes422HQ) }
                 Button("ProRes 4444…") { workspace.exportShots([shot.id], codec: .proRes4444) }
@@ -328,10 +332,12 @@ private struct BurstShotRow: View {
             }
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(Color.black.opacity(0.4), lineWidth: 0.5)
+                    .stroke(workspace.selectedShotID == shot.id ? KineTheme.accent : Color.black.opacity(0.4),
+                            lineWidth: workspace.selectedShotID == shot.id ? 1.5 : 0.5)
             )
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .contentShape(Rectangle())
+            .onTapGesture { workspace.selectShot(shot.id) }
         }
         .frame(height: 50)
     }

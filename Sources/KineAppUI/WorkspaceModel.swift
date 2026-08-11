@@ -3607,6 +3607,73 @@ public final class WorkspaceModel: ObservableObject {
         markDirty()
     }
 
+    // MARK: - Shot grading
+
+    /// Shot targeted by the Shot grade tab (set by clicking a bin row).
+    @Published public var selectedShotID: ShotID?
+    /// Clipboard for copy/paste grade across shots.
+    @Published public var copiedShotGrade: ShotGrade?
+
+    public var selectedShot: BurstShot? {
+        selectedShotID.flatMap { project.mediaPool.shots[$0] }
+    }
+
+    public func selectShot(_ id: ShotID) {
+        selectedShotID = id
+        sourcePaneTab = .shotGrade
+        focusedViewer = .source
+    }
+
+    public func setShotGrade(_ grade: ShotGrade, for id: ShotID) {
+        guard var shot = project.mediaPool.shots[id] else { return }
+        shot.grade = grade
+        project.mediaPool.shots[id] = shot
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func copyGrade(from id: ShotID) {
+        copiedShotGrade = project.mediaPool.shots[id]?.grade
+    }
+
+    public func pasteGrade(to id: ShotID) {
+        guard let grade = copiedShotGrade else { return }
+        setShotGrade(grade, for: id)
+    }
+
+    // MARK: - Looks (saved grades)
+
+    public static var looksDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Kinestasis", isDirectory: true)
+            .appendingPathComponent("Looks", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    public func saveLook(_ grade: ShotGrade, name: String) {
+        let url = Self.looksDirectory.appendingPathComponent("\(name).kinelook")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(grade) {
+            try? data.write(to: url)
+            objectWillChange.send()
+        }
+    }
+
+    public func availableLooks() -> [(name: String, url: URL)] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: Self.looksDirectory, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.pathExtension == "kinelook" }
+            .map { ($0.deletingPathExtension().lastPathComponent, $0) }
+            .sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
+    }
+
+    public func loadLook(from url: URL) -> ShotGrade? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ShotGrade.self, from: data)
+    }
+
     /// The frame rate shot stats and exports use: the active sequence's
     /// rate when one exists, else the project default.
     public var shotFrameRate: FrameRate {

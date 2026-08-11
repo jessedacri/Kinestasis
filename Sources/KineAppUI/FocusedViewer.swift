@@ -26,6 +26,7 @@ public enum SourcePaneTab: Sendable, Equatable {
     case source
     case effectControls
     case color
+    case shotGrade
 }
 
 /// Bin browser filter mode. FCP-style: show all master clips, or only

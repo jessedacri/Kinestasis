@@ -62,6 +62,7 @@ public struct BurstShotExporter: Sendable {
         isCancelled: @Sendable () -> Bool = { false },
         progress: @Sendable (Double) -> Void = { _ in }
     ) throws -> URL {
+        let gradeRenderer = shot.grade.isIdentity ? nil : ShotGradeRenderer()
         let schedule = ShotTimingEngine.schedule(frames: shot.frames, mode: mode, rate: rate)
         guard !schedule.isEmpty, !shot.frames.isEmpty else { throw ExportError.emptyShot }
 
@@ -121,7 +122,10 @@ public struct BurstShotExporter: Sendable {
                 return outputURL
             }
             let stillURL = shot.frames[event.frameIndex].url
-            guard let image = StillDecoder.decode(url: stillURL, maxPixel: max(nativeSize.width, nativeSize.height)) else {
+            let maxEdge = max(nativeSize.width, nativeSize.height)
+            let decoded = gradeRenderer?.render(url: stillURL, grade: shot.grade, maxPixel: maxEdge)
+                ?? StillDecoder.decode(url: stillURL, maxPixel: maxEdge)
+            guard let image = decoded else {
                 input.markAsFinished()
                 writer.cancelWriting()
                 throw ExportError.stillDecodeFailed(stillURL)

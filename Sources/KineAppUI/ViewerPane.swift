@@ -38,6 +38,8 @@ struct ViewerPane: View {
                     EffectControlsContent(workspace: workspace)
                 case .color:
                     ColorPanelContent(workspace: workspace)
+                case .shotGrade:
+                    ShotGradePanel(workspace: workspace)
                 }
             }
         }
@@ -98,6 +100,13 @@ struct ViewerPane: View {
             }
             tabButton(title: "Color", tab: .color) {
                 EmptyView()
+            }
+            tabButton(title: "Shot", tab: .shotGrade) {
+                if let shot = workspace.selectedShot, !shot.grade.isIdentity {
+                    Circle()
+                        .fill(KineTheme.accent)
+                        .frame(width: 5, height: 5)
+                }
             }
             Spacer()
             if workspace.sourcePaneTab == .source, let clip {
