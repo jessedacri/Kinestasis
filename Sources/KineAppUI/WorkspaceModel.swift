@@ -3669,6 +3669,135 @@ public final class WorkspaceModel: ObservableObject {
         setShotGrade(grade, for: id)
     }
 
+    // MARK: - Assembly (shots → timeline)
+
+    public static var renderedShotsDirectory: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Kinestasis", isDirectory: true)
+            .appendingPathComponent("RenderedShots", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Stable content hash over everything that affects a shot's rendered
+    /// pixels + timing — cache key for assembly renders.
+    private func renderHash(for shot: BurstShot, rate: FrameRate, defaults: ShotTimingMode) -> String {
+        struct Key: Codable {
+            let paths: [String]; let times: [Double]
+            let mode: ShotTimingMode; let ramp: [CurvePoint]
+            let grade: ShotGrade; let rate: String
+        }
+        let key = Key(paths: shot.frames.map(\.url.path), times: shot.frames.map(\.captureTime),
+                      mode: shot.timing(projectDefault: defaults), ramp: shot.speedRamp,
+                      grade: shot.grade, rate: rate.rawValue)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let data = (try? encoder.encode(key)) ?? Data()
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in data { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        return String(format: "%016llx", hash)
+    }
+
+    /// Render every shot (cache-aware) to intermediate ProRes, import the
+    /// renders as clips, and lay them on an "Assembly" sequence in bin
+    /// order — then switch to Assemble mode for trimming + final export.
+    /// Timeline sources ARE the rendered files, so the cut is WYSIWYG
+    /// with the batch export by construction.
+    public func assembleShots() {
+        let shots = orderedShots
+        guard !shots.isEmpty, shotExportProgress == nil else { return }
+        let rate = shotFrameRate
+        let defaults = project.settings.burst.timing
+        let exporter = BurstShotExporter()
+        let directory = Self.renderedShotsDirectory
+        let jobs: [(BurstShot, String)] = shots.map { ($0, "\($0.name)-\(renderHash(for: $0, rate: rate, defaults: defaults)).mov") }
+        shotExportProgress = 0
+
+        Task.detached(priority: .userInitiated) {
+            var rendered: [(BurstShot, URL)] = []
+            var failures: [String] = []
+            for (i, job) in jobs.enumerated() {
+                let (shot, filename) = job
+                let url = directory.appendingPathComponent(filename)
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    do {
+                        try exporter.export(shot: shot, mode: shot.timing(projectDefault: defaults),
+                                            rate: rate, codec: .proRes422HQ,
+                                            to: directory, filename: filename)
+                    } catch {
+                        failures.append("\(shot.name): \(error.localizedDescription)")
+                        continue
+                    }
+                }
+                rendered.append((shot, url))
+                let fraction = Double(i + 1) / Double(jobs.count)
+                await MainActor.run { self.shotExportProgress = fraction }
+            }
+            await MainActor.run {
+                self.shotExportProgress = nil
+                self.finishAssembly(rendered: rendered, rate: rate, failures: failures)
+            }
+        }
+    }
+
+    private func finishAssembly(rendered: [(BurstShot, URL)], rate: FrameRate, failures: [String]) {
+        guard !rendered.isEmpty else {
+            if !failures.isEmpty { presentAssemblyFailures(failures) }
+            return
+        }
+        Task { @MainActor in
+            // Sequence sized to the largest rendered shot.
+            let firstSize = rendered.compactMap { $0.0.frames.first?.pixelSize }.max(by: { $0.width < $1.width })
+                ?? project.settings.defaultResolution
+            let settings = SequenceSettings(
+                frameRate: rate,
+                resolution: PixelSize(width: firstSize.width - firstSize.width % 2,
+                                      height: firstSize.height - firstSize.height % 2))
+            let name = uniqueSequenceName(base: "Assembly")
+            createSequence(name: name, settings: settings)
+
+            var cursor = RationalTime.zero
+            for (shot, url) in rendered {
+                let clipID: ClipID
+                if let existing = project.mediaPool.clips.values.first(where: { $0.url == url }) {
+                    clipID = existing.id
+                } else if let probed = try? await prober.probe(url: url) {
+                    var clip = probed
+                    clip.name = "\(shot.name) (rendered)"
+                    project.mediaPool.clips[clip.id] = clip
+                    project.mediaPool.rootBin.children.append(.clip(clip.id))
+                    schedulePreviews(for: clip)
+                    clipID = clip.id
+                } else {
+                    continue
+                }
+                insertClip(clipID, atTime: cursor)
+                if let placed = project.mediaPool.clips[clipID] {
+                    let endSeconds = cursor.seconds + placed.duration.seconds
+                    cursor = RationalTime(value: Int64((endSeconds * 1000).rounded()), scale: 1000)
+                }
+            }
+            appMode = .assemble
+            if !failures.isEmpty { presentAssemblyFailures(failures) }
+        }
+    }
+
+    private func uniqueSequenceName(base: String) -> String {
+        var name = base
+        var n = 2
+        while project.sequences.contains(where: { $0.name == name }) {
+            name = "\(base) \(n)"; n += 1
+        }
+        return name
+    }
+
+    private func presentAssemblyFailures(_ failures: [String]) {
+        let alert = NSAlert()
+        alert.messageText = "Some shots failed to render"
+        alert.informativeText = failures.joined(separator: "\n")
+        alert.runModal()
+    }
+
     // MARK: - Looks (saved grades)
 
     public static var looksDirectory: URL {

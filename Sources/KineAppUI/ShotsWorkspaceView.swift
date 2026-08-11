@@ -94,8 +94,16 @@ struct ShotsWorkspaceView: View {
 
             if let progress = workspace.shotExportProgress {
                 ProgressView(value: progress).controlSize(.small).frame(width: 110)
-                Text("Exporting…").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Rendering…").font(.system(size: 11)).foregroundStyle(.secondary)
             } else if !workspace.orderedShots.isEmpty {
+                Button {
+                    workspace.assembleShots()
+                } label: {
+                    Label("Assemble", systemImage: "timeline.selection")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .help("Render all shots and lay them on a timeline for trimming")
+
                 Menu {
                     Button("ProRes 422 HQ + XML…") { workspace.exportShots(codec: .proRes422HQ) }
                     Button("ProRes 4444 + XML…") { workspace.exportShots(codec: .proRes4444) }

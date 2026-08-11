@@ -59,6 +59,7 @@ public struct BurstShotExporter: Sendable {
         rate: FrameRate,
         codec: Codec,
         to directory: URL,
+        filename: String? = nil,
         isCancelled: @Sendable () -> Bool = { false },
         progress: @Sendable (Double) -> Void = { _ in }
     ) throws -> URL {
@@ -81,7 +82,8 @@ public struct BurstShotExporter: Sendable {
         let width = nativeSize.width - (nativeSize.width % 2)
         let height = nativeSize.height - (nativeSize.height % 2)
 
-        let outputURL = Self.outputURL(for: shot, codec: codec, in: directory)
+        let outputURL = filename.map { directory.appendingPathComponent($0) }
+            ?? Self.outputURL(for: shot, codec: codec, in: directory)
         try? FileManager.default.removeItem(at: outputURL)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
