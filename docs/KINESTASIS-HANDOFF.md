@@ -36,6 +36,14 @@ the timeline: the compositor resolves `kine-shot://<uuid>` clip URLs to it).
 
 ## Footguns (learned the hard way — don't regress)
 
+- **Never `Bundle.module` on a launch path.** The swift-build-generated
+  accessor searches only the .app root and this machine's absolute `.build`
+  path, then traps — the packaged app crashed at launch on every other Mac
+  (0.1.0, crash/). Use `KineCore.ResourceBundle.locate(named:)`, which
+  checks Contents/Resources first and returns nil instead of trapping.
+  `scripts/build-dmg.sh` smoke-launches the wrapped app with `.build`
+  masked to catch any regression of this class; the manual equivalent is
+  `mv .build .build.hidden && build/Kinestasis.app/Contents/MacOS/Kinestasis`.
 - **X-Pro2 writes no sub-second EXIF.** Whole-second timestamp runs are
   spread evenly (`BurstGrouper.spreadEqualTimestamps`) or as-shot cadence
   collapses. Subsec fallback chain: Original → Digitized → SubSecTime.
