@@ -390,9 +390,10 @@ private struct ShotCard: View {
         let total = ShotTimingEngine.totalFrames(sched)
         guard total > 0 else { return nil }
         let f = Int64((fraction * Double(total - 1)).rounded())
+        let playable = shot.playbackFrames
         guard let event = ShotTimingEngine.event(at: f, in: sched),
-              shot.frames.indices.contains(event.frameIndex) else { return nil }
-        return shot.sourceURL(for: shot.frames[event.frameIndex])
+              playable.indices.contains(event.frameIndex) else { return nil }
+        return shot.sourceURL(for: playable[event.frameIndex])
     }
 
     var body: some View {
@@ -401,6 +402,7 @@ private struct ShotCard: View {
                 ZStack(alignment: .topLeading) {
                     let _ = workspace.previewVersion
                     stripOrSkimFrame
+                    trimShade(width: geo.size.width)
                     playheadLine(width: geo.size.width)
                     badges
                     includeToggle
@@ -464,6 +466,9 @@ private struct ShotCard: View {
                     workspace.setShotTiming(mode, for: shot.id)
                 }
             }
+            Menu("Frame Skip") {
+                FrameSkipPicker(current: shot.frameSkip) { workspace.setShotFrameSkip($0, for: shot.id) }
+            }
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
             Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
                 .disabled(workspace.copiedShotGrade == nil)
@@ -496,6 +501,23 @@ private struct ShotCard: View {
                 .overlay(ProgressView().controlSize(.small))
         } else {
             ShotFilmstrip(images: images, aspect: aspect)
+        }
+    }
+
+    /// Trimmed-off head/tail darkened over the filmstrip, so the kept
+    /// range reads at a glance.
+    @ViewBuilder private func trimShade(width: CGFloat) -> some View {
+        if shot.isTrimmed, !shot.frames.isEmpty {
+            let n = CGFloat(shot.frames.count)
+            HStack(spacing: 0) {
+                Rectangle().fill(Color.black.opacity(0.62))
+                    .frame(width: max(0, CGFloat(shot.trimIn) / n * width))
+                Spacer(minLength: 0)
+                Rectangle().fill(Color.black.opacity(0.62))
+                    .frame(width: max(0, CGFloat(shot.trimOut) / n * width))
+            }
+            .frame(width: width)
+            .allowsHitTesting(false)
         }
     }
 
@@ -570,7 +592,8 @@ private struct ShotCard: View {
 
     private var statsLine: String {
         let seconds = Double(ShotTimingEngine.totalFrames(schedule)) / rate.fps
-        return String(format: "%.1fs · %@ · %@", seconds, timingModeLabel(mode), shot.fileTypeLabel)
+        let skip = shot.frameSkip > 1 ? " · skip \(shot.frameSkip)" : ""
+        return String(format: "%.1fs · %@%@ · %@", seconds, timingModeLabel(mode), skip, shot.fileTypeLabel)
     }
 }
 
@@ -681,13 +704,6 @@ struct TimingOptionRows: View {
             BarOptionRow(label: "Real time", selected: current == .asShot(rate: 1.0)) { onPick(.asShot(rate: 1.0)) }
             BarOptionRow(label: "Half speed", selected: current == .asShot(rate: 0.5)) { onPick(.asShot(rate: 0.5)) }
             BarOptionRow(label: "Double speed", selected: current == .asShot(rate: 2.0)) { onPick(.asShot(rate: 2.0)) }
-            sectionLabel("Frame Skip")
-            ForEach([2, 3, 4], id: \.self) { n in
-                BarOptionRow(label: "Every \(n == 2 ? "2nd" : n == 3 ? "3rd" : "\(n)th") still",
-                             selected: current == .frameSkip(every: n, frames: 3)) {
-                    onPick(.frameSkip(every: n, frames: 3))
-                }
-            }
         }
     }
 

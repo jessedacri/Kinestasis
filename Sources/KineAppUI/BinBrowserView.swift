@@ -308,6 +308,9 @@ private struct BurstShotRow: View {
                     workspace.setShotTiming(mode, for: shot.id)
                 }
             }
+            Menu("Frame Skip") {
+                FrameSkipPicker(current: shot.frameSkip) { workspace.setShotFrameSkip($0, for: shot.id) }
+            }
             Button("Grade…") { workspace.selectShot(shot.id) }
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
             Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
@@ -329,6 +332,18 @@ private struct BurstShotRow: View {
                 stripContent
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
+                if shot.isTrimmed, !shot.frames.isEmpty {
+                    let n = CGFloat(shot.frames.count)
+                    HStack(spacing: 0) {
+                        Rectangle().fill(Color.black.opacity(0.62))
+                            .frame(width: max(0, CGFloat(shot.trimIn) / n * geo.size.width))
+                        Spacer(minLength: 0)
+                        Rectangle().fill(Color.black.opacity(0.62))
+                            .frame(width: max(0, CGFloat(shot.trimOut) / n * geo.size.width))
+                    }
+                    .frame(width: geo.size.width)
+                    .allowsHitTesting(false)
+                }
                 nameOverlay
             }
             .overlay(
@@ -490,13 +505,6 @@ struct TimingModePicker: View {
             item(label: asShotLabel("Half speed", speed: 0.5), mode: .asShot(rate: 0.5), checked: current == .asShot(rate: 0.5))
             item(label: asShotLabel("Double speed", speed: 2.0), mode: .asShot(rate: 2.0), checked: current == .asShot(rate: 2.0))
         }
-        Section("Frame Skip") {
-            ForEach([2, 3, 4], id: \.self) { n in
-                item(label: "Every \(ordinal(n)) still · 3 frames",
-                     mode: .frameSkip(every: n, frames: 3),
-                     checked: current == .frameSkip(every: n, frames: 3))
-            }
-        }
     }
 
     @ViewBuilder private func item(label: String, mode: ShotTimingMode?, checked: Bool) -> some View {
@@ -523,6 +531,36 @@ struct TimingModePicker: View {
         guard let captureFPS, captureFPS > 0, let outputRate else { return base }
         let framesPerStill = outputRate.fps / (captureFPS * speed)
         return String(format: "%@ (about %.1f frames/still at %@)", base, framesPerStill, outputRate.rawValue)
+    }
+}
+
+/// Frame skip is its own setting, not a timing mode, so it composes with
+/// as-shot speeds and fixed frames-per-still.
+struct FrameSkipPicker: View {
+    let current: Int
+    let onPick: (Int) -> Void
+
+    var body: some View {
+        ForEach([1, 2, 3, 4, 6, 8], id: \.self) { n in
+            Button {
+                onPick(n)
+            } label: {
+                if current == n {
+                    Label(skipLabel(n), systemImage: "checkmark")
+                } else {
+                    Text(skipLabel(n))
+                }
+            }
+        }
+    }
+}
+
+func skipLabel(_ n: Int) -> String {
+    switch n {
+    case ...1: return "Every still"
+    case 2: return "Every 2nd still"
+    case 3: return "Every 3rd still"
+    default: return "Every \(n)th still"
     }
 }
 

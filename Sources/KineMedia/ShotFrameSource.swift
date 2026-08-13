@@ -36,7 +36,7 @@ public final class ShotFrameSource: VideoFrameSource, @unchecked Sendable {
 
     public init(shot: BurstShot, defaultTiming: ShotTimingMode, rate: FrameRate, maxPixel: Int) {
         self.shot = shot
-        self.frames = shot.effectiveFrames
+        self.frames = shot.playbackFrames
         self.schedule = ShotTimingEngine.schedule(for: shot, projectDefault: defaultTiming, rate: rate)
         self.totalFrames = ShotTimingEngine.totalFrames(schedule)
         self.nominalFrameRate = rate.fps

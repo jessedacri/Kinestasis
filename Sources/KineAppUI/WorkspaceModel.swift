@@ -4095,6 +4095,7 @@ public final class WorkspaceModel: ObservableObject {
         hasher.combine(shot.frames.count)
         hasher.combine(shot.trimIn)
         hasher.combine(shot.trimOut)
+        hasher.combine(shot.frameSkip)
         let key = hasher.finalize()
         if let cached = scheduleCache[shot.id], cached.key == key { return cached.schedule }
         let schedule = ShotTimingEngine.schedule(
@@ -4117,12 +4118,13 @@ public final class WorkspaceModel: ObservableObject {
 
     // MARK: - Per-shot trim (non-destructive head/tail)
 
-    /// Trim the head to the still under the playhead (kept).
+    /// Trim the head to the still under the playhead (kept). Event indices
+    /// count playback (skip-strided) stills, so scale back to absolutes.
     public func setShotTrimInAtPlayhead() {
         guard let shot = previewShot,
               let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
         var updated = shot
-        updated.trimIn = min(shot.frames.count - 1, shot.trimIn + event.frameIndex)
+        updated.trimIn = min(shot.frames.count - 1, shot.trimIn + event.frameIndex * max(1, shot.frameSkip))
         updated.trimOut = min(updated.trimOut, shot.frames.count - 1 - updated.trimIn)
         applyTrim(updated)
     }
@@ -4132,7 +4134,7 @@ public final class WorkspaceModel: ObservableObject {
         guard let shot = previewShot,
               let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
         var updated = shot
-        let absoluteIndex = shot.trimIn + event.frameIndex
+        let absoluteIndex = shot.trimIn + event.frameIndex * max(1, shot.frameSkip)
         updated.trimOut = max(0, shot.frames.count - 1 - absoluteIndex)
         updated.trimIn = min(updated.trimIn, shot.frames.count - 1 - updated.trimOut)
         applyTrim(updated)
@@ -4146,6 +4148,15 @@ public final class WorkspaceModel: ObservableObject {
 
     private func applyTrim(_ shot: BurstShot) {
         project.mediaPool.shots[shot.id] = shot
+        shotPlayheadFrame = 0
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func setShotFrameSkip(_ every: Int, for id: ShotID) {
+        guard var shot = project.mediaPool.shots[id], shot.frameSkip != max(1, every) else { return }
+        shot.frameSkip = max(1, every)
+        project.mediaPool.shots[id] = shot
         shotPlayheadFrame = 0
         project.modifiedAt = Date()
         markDirty()
@@ -4235,7 +4246,7 @@ public final class WorkspaceModel: ObservableObject {
     /// RAW/JPEG source toggle.
     public func currentShotFrameURL() -> URL? {
         guard let shot = previewShot else { return nil }
-        let frames = shot.effectiveFrames
+        let frames = shot.playbackFrames
         guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)),
               frames.indices.contains(event.frameIndex) else { return nil }
         return shot.sourceURL(for: frames[event.frameIndex])

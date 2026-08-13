@@ -127,7 +127,7 @@ public struct BurstShotExporter: Sendable {
         isCancelled: @Sendable () -> Bool = { false },
         progress: @Sendable (Double) -> Void = { _ in }
     ) throws -> URL {
-        let frames = shot.effectiveFrames
+        let frames = shot.playbackFrames
         let schedule = ShotTimingEngine.applyRamp(
             ShotTimingEngine.schedule(frames: frames, mode: mode, rate: rate),
             ramp: shot.speedRamp)

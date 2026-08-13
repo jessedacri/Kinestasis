@@ -169,6 +169,27 @@ struct ShotGradePanel: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(KineTheme.bgPanel)
+
+            // Where the kept range sits inside the full shot: dark ends
+            // are trimmed off and never play in the loop.
+            if shot.isTrimmed, !shot.frames.isEmpty {
+                GeometryReader { geo in
+                    let n = CGFloat(shot.frames.count)
+                    let x0 = CGFloat(shot.trimIn) / n * geo.size.width
+                    let x1 = CGFloat(shot.frames.count - shot.trimOut) / n * geo.size.width
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.black.opacity(0.5))
+                        Capsule().fill(KineTheme.accent.opacity(0.85))
+                            .frame(width: max(2, x1 - x0))
+                            .offset(x: x0)
+                    }
+                }
+                .frame(height: 3)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
+                .background(KineTheme.bgPanel)
+                .help("Kept range inside the full shot. Dark ends are trimmed off and do not play.")
+            }
         }
     }
 
@@ -239,6 +260,13 @@ struct ShotGradePanel: View {
                         .font(.system(size: 11))
                 }
                 .fixedSize()
+                Menu {
+                    FrameSkipPicker(current: shot.frameSkip) { workspace.setShotFrameSkip($0, for: shot.id) }
+                } label: {
+                    Label(skipLabel(shot.frameSkip), systemImage: "square.3.layers.3d.middle.filled")
+                        .font(.system(size: 11))
+                }
+                .fixedSize()
                 Spacer()
                 Toggle(isOn: Binding(
                     get: { shot.includeInExport },
@@ -266,6 +294,9 @@ struct ShotGradePanel: View {
             } else {
                 bits.append(String(format: "shot over %.1fs", shot.captureSpan))
             }
+        }
+        if shot.frameSkip > 1 {
+            bits.append(skipLabel(shot.frameSkip).lowercased())
         }
         bits.append(String(format: "plays %.1fs @ %@", seconds, rate.rawValue))
         return bits
