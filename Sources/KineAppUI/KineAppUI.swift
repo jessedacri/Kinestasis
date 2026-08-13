@@ -89,24 +89,40 @@ public struct KineRootView: View {
         )
     }
 
-    /// Mode strip: the Kinestasis flow first (Shots), the inherited
-    /// timeline second (Assemble).
+    /// One view strip for the whole app: VIEW | Bin, Develop, Assemble.
+    /// Bin and Develop are the Kinestasis flow; Assemble is the inherited
+    /// timeline.
     private var modeBar: some View {
         HStack(spacing: 0) {
-            ForEach(WorkspaceModel.AppMode.allCases, id: \.self) { mode in
-                let active = workspace.appMode == mode
-                Text(mode.rawValue)
-                    .font(.system(size: 11, weight: active ? .semibold : .regular))
-                    .foregroundStyle(active ? Color.white : Color.secondary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 4)
-                    .background(active ? KineTheme.accent : Color.clear)
-                    .contentShape(Rectangle())
-                    .onTapGesture { workspace.appMode = mode }
+            Text("VIEW")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 12)
+            viewTab("Bin", active: workspace.appMode == .shots && workspace.shotsViewMode == .bin) {
+                workspace.appMode = .shots
+                workspace.shotsViewMode = .bin
+            }
+            viewTab("Develop", active: workspace.appMode == .shots && workspace.shotsViewMode == .develop) {
+                workspace.appMode = .shots
+                workspace.shotsViewMode = .develop
+            }
+            viewTab("Assemble", active: workspace.appMode == .assemble) {
+                workspace.appMode = .assemble
             }
             Spacer()
         }
         .background(KineTheme.bgPanel)
+    }
+
+    private func viewTab(_ label: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Text(label)
+            .font(.system(size: 11, weight: active ? .semibold : .regular))
+            .foregroundStyle(active ? Color.white : Color.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 4)
+            .background(active ? KineTheme.accent : Color.clear)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
     }
 
     private var content: some View {

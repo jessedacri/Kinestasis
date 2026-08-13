@@ -53,13 +53,6 @@ struct ShotsWorkspaceView: View {
 
             Divider().frame(height: 16)
 
-            HStack(spacing: 2) {
-                viewModeButton("Bin", .bin)
-                viewModeButton("Develop", .develop)
-            }
-
-            Divider().frame(height: 16)
-
             BarValueControl(label: "Rate", value: workspace.project.settings.defaultFrameRate.rawValue + " fps") {
                 ForEach(FrameRate.allCases, id: \.self) { rate in
                     BarOptionRow(label: rate.rawValue + " fps",
@@ -176,22 +169,6 @@ struct ShotsWorkspaceView: View {
     }
 
 
-
-    private func viewModeButton(_ label: String, _ mode: WorkspaceModel.ShotsViewMode) -> some View {
-        let active = workspace.shotsViewMode == mode
-        return Button {
-            workspace.shotsViewMode = mode
-        } label: {
-            Text(label)
-                .font(.system(size: 11, weight: active ? .semibold : .regular))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(active ? KineTheme.accent.opacity(0.22) : Color.clear)
-                .foregroundStyle(active ? KineTheme.accent : .secondary)
-                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
 
     private func gapLabel(_ gap: Double) -> String {
         String(format: gap < 1 ? "%.1f s" : "%.0f s", gap)

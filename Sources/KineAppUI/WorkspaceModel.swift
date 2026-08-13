@@ -323,6 +323,28 @@ public final class WorkspaceModel: ObservableObject {
             self?.previewVersion &+= 1
         }
         WorkspaceModel.current = self
+        startLagWatchdog()
+    }
+
+    /// Prints when the main thread stops answering, with decode-pool
+    /// stats, so "the app hangs" comes with a culprit attached. Output
+    /// lands wherever stdout goes (the launch terminal / task log).
+    private nonisolated func startLagWatchdog() {
+        DispatchQueue(label: "kine.lag.watchdog", qos: .utility).async { [weak self] in
+            while true {
+                let sent = DispatchTime.now()
+                DispatchQueue.main.async {
+                    let ms = Double(DispatchTime.now().uptimeNanoseconds &- sent.uptimeNanoseconds) / 1e6
+                    guard ms > 250, let self else { return }
+                    MainActor.assumeIsolated {
+                        print(String(format: "[lag] main thread stalled %.0f ms · pending %d · decoding %d · thumbs %d · cache %.0f MB",
+                                     ms, self.previewPending.count, self.previewActiveCount,
+                                     self.thumbActiveCount, Double(self.shotFrameBytes) / 1e6))
+                    }
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
     }
 
     /// Kick off (or no-op if already cached / in flight) waveform and
@@ -4106,7 +4128,18 @@ public final class WorkspaceModel: ObservableObject {
             guard !shotFramesInFlight.contains(url) else { continue }
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
+            let hasAnyFrame = shotFrameCache[url] != nil
             Task.detached(priority: .userInitiated) {
+                // High tier on a cold frame: put the instant embedded
+                // preview on screen first, then let the real develop
+                // replace it - scrubbing never shows a hole while a
+                // half-second RAW develop runs.
+                if fullDecode, !hasAnyFrame,
+                   let quick = StillDecoder.preview(url: url, maxPixel: 960) {
+                    await MainActor.run {
+                        self.storeInterimFrame(url: url, image: quick)
+                    }
+                }
                 let image = fullDecode
                     ? StillDecoder.decode(url: url, maxPixel: maxPixel)
                     : StillDecoder.preview(url: url, maxPixel: maxPixel)
@@ -4118,6 +4151,19 @@ public final class WorkspaceModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// A quick placeholder stored as stale, so it displays immediately
+    /// but the in-flight full decode still replaces it.
+    private func storeInterimFrame(url: URL, image: CGImage) {
+        if let old = shotFrameCache[url] {
+            shotFrameBytes -= old.image.width * old.image.height * 4
+        } else {
+            shotFrameOrder.append(url)
+        }
+        shotFrameCache[url] = (image, cacheEpoch - 1)
+        shotFrameBytes += image.width * image.height * 4
+        bumpPreviewsCoalesced()
     }
 
     private func storePreviewFrame(url: URL, image: CGImage) {
@@ -4152,9 +4198,10 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     /// Warm the cache for a whole shot (first ~160 frames) so skim and
-    /// playback are instant.
+    /// playback are instant. Enqueued in reverse: the decode pool drains
+    /// newest-first, so this makes priming run from frame 0 forward.
     public func prefetchPreviewFrames(for shot: BurstShot) {
-        for frame in shot.frames.prefix(160) {
+        for frame in shot.frames.prefix(160).reversed() {
             requestPreviewFrame(shot.sourceURL(for: frame))
         }
     }
@@ -4401,14 +4448,19 @@ public final class WorkspaceModel: ObservableObject {
     /// length. The selection is untouched — space/JKL act on what's under
     /// the cursor, but the inspector keeps the clicked shot.
     public func skimShot(_ id: ShotID, fraction: Double) {
-        if previewShot?.id != id { shotStop() }
+        let targetChanged = previewShot?.id != id
+        if targetChanged { shotStop() }
         if id == selectedShotID {
             skimShotID = nil
         } else if skimShotID != id {
             if skimShotID == nil { savedSelectedPlayhead = shotPlayheadFrame }
             skimShotID = id
         }
-        if let shot = project.mediaPool.shots[id] { prefetchPreviewFrames(for: shot) }
+        // Prefetch once per shot entered, not once per mouse move - the
+        // per-event flood was a real hover hitch on big bursts.
+        if targetChanged, let shot = project.mediaPool.shots[id] {
+            prefetchPreviewFrames(for: shot)
+        }
         let total = ShotTimingEngine.totalFrames(scheduleForPreviewShot())
         guard total > 0 else { return }
         shotPlayheadFrame = max(0, min(total - 1, Int64((fraction * Double(total - 1)).rounded())))
