@@ -486,7 +486,11 @@ public enum ShotTimingEngine {
         for f in 0..<total {
             let progress = Double(f) / Double(total - 1)
             let sourcePos = curve.evaluate(progress)
-            let sourceFrame = max(maxSourceFrame, Int64((sourcePos * Double(total - 1)).rounded()))
+            // Floor with epsilon: y is cumulative progress, so a value
+            // exactly on a still boundary belongs to the still just
+            // finished (round-to-nearest bled holds into their neighbor).
+            let raw = Int64((sourcePos * Double(total) - 1e-9).rounded(.down))
+            let sourceFrame = max(maxSourceFrame, max(0, min(Int64(total - 1), raw)))
             maxSourceFrame = sourceFrame
             let idx = event(at: sourceFrame, in: schedule)?.frameIndex ?? schedule[0].frameIndex
             if let last = events.last, last.frameIndex == idx {

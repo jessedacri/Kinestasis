@@ -3845,6 +3845,26 @@ public final class WorkspaceModel: ObservableObject {
     /// What the player window shows: a hover skim wins, else the selection.
     public var previewShot: BurstShot? { skimmedShot ?? selectedShot }
 
+    /// The fullscreen processing view (Cmd+F in Shots mode): big player,
+    /// inspector at the side, skimmable shot strip below.
+    @Published public var shotsFullscreen = false
+
+    /// Keys currently held, for the glyph bar (space/jkl/io/m/arrows).
+    @Published public var pressedKeys: Set<String> = []
+
+    /// Up/Down arrows and the strip buttons: move the selection through
+    /// the ordered shots.
+    public func selectAdjacentShot(_ delta: Int) {
+        let shots = orderedShots
+        guard !shots.isEmpty else { return }
+        let idx = shots.firstIndex(where: { $0.id == selectedShotID }).map { $0 + delta } ?? 0
+        let clamped = min(max(0, idx), shots.count - 1)
+        guard shots[clamped].id != selectedShotID else { return }
+        shotStop()
+        shotPlayheadFrame = 0
+        selectShot(shots[clamped].id)
+    }
+
     public func selectShot(_ id: ShotID) {
         // Clicking the shot under the cursor adopts the skim position as
         // the new selection; the playhead stays where the skim put it.
@@ -3953,8 +3973,81 @@ public final class WorkspaceModel: ObservableObject {
     private var shotFrameCache: [URL: CGImage] = [:]
     private var shotFrameOrder: [URL] = []
     private var shotFramesInFlight: Set<URL> = []
-    private static let shotFrameCap = 400
-    private static let shotFramePixels = 448
+    /// Eviction is by memory, not count: High-tier frames are ~5x Draft.
+    private static let shotFrameByteBudget = 700 * 1024 * 1024
+    private var shotFrameBytes = 0
+    private var shotFramePixels: Int { previewQuality.maxPixel }
+
+    /// Skim/playback decode size. Draft is the old 448 behavior; High is
+    /// still an embedded-preview decode, so playback stays realtime.
+    public enum PreviewQuality: String, CaseIterable, Sendable {
+        case draft, balanced, high
+        public var maxPixel: Int {
+            switch self {
+            case .draft: return 448
+            case .balanced: return 720
+            case .high: return 1080
+            }
+        }
+        public var label: String {
+            switch self {
+            case .draft: return "Draft"
+            case .balanced: return "Balanced"
+            case .high: return "High"
+            }
+        }
+    }
+
+    @Published public private(set) var previewQuality: PreviewQuality = {
+        UserDefaults.standard.string(forKey: "previewQuality")
+            .flatMap(PreviewQuality.init(rawValue:)) ?? .balanced
+    }()
+
+    public func setPreviewQuality(_ quality: PreviewQuality) {
+        guard quality != previewQuality else { return }
+        previewQuality = quality
+        UserDefaults.standard.set(quality.rawValue, forKey: "previewQuality")
+        shotFrameCache = [:]
+        shotFrameOrder = []
+        shotFrameBytes = 0
+        refinedFrame = nil
+        previewVersion += 1
+        if let shot = previewShot { prefetchPreviewFrames(for: shot) }
+    }
+
+    // MARK: - Paused refinement (near-full quality when parked)
+
+    private var refinedFrame: (url: URL, image: CGImage)?
+    private var refineGeneration = 0
+    private static let refinePixels = 2560
+
+    public func cachedRefinedFrame(_ url: URL) -> CGImage? {
+        refinedFrame?.url == url ? refinedFrame?.image : nil
+    }
+
+    /// Debounced: when the transport is parked on a frame, develop it at
+    /// near-full resolution (real decode, not the embedded preview - this
+    /// is what makes small-preview RAWs like Sony ARW sharp when paused)
+    /// and swap it in under the grade.
+    public func scheduleRefinedFrame() {
+        refineGeneration += 1
+        let generation = refineGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, generation == self.refineGeneration,
+                  self.shotPlayRate == 0,
+                  let url = self.currentShotFrameURL(),
+                  self.refinedFrame?.url != url else { return }
+            let pixels = Self.refinePixels
+            Task.detached(priority: .utility) {
+                guard let image = StillDecoder.decode(url: url, maxPixel: pixels) else { return }
+                await MainActor.run {
+                    guard generation == self.refineGeneration else { return }
+                    self.refinedFrame = (url, image)
+                    self.bumpPreviewsCoalesced()
+                }
+            }
+        }
+    }
 
     public func cachedPreviewFrame(_ url: URL) -> CGImage? {
         shotFrameCache[url]
@@ -3985,7 +4078,7 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     private func pumpPreviewDecodes() {
-        let maxPixel = Self.shotFramePixels
+        let maxPixel = shotFramePixels
         while previewActiveCount < Self.previewMaxConcurrent, !previewPending.isEmpty {
             let url = previewPending.removeLast()
             previewPendingSet.remove(url)
@@ -4005,10 +4098,18 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     private func storePreviewFrame(url: URL, image: CGImage) {
-        if shotFrameCache[url] == nil { shotFrameOrder.append(url) }
+        if let old = shotFrameCache[url] {
+            shotFrameBytes -= old.width * old.height * 4
+        } else {
+            shotFrameOrder.append(url)
+        }
         shotFrameCache[url] = image
-        while shotFrameOrder.count > Self.shotFrameCap {
-            shotFrameCache[shotFrameOrder.removeFirst()] = nil
+        shotFrameBytes += image.width * image.height * 4
+        while shotFrameBytes > Self.shotFrameByteBudget, shotFrameOrder.count > 1 {
+            let evicted = shotFrameOrder.removeFirst()
+            if let img = shotFrameCache.removeValue(forKey: evicted) {
+                shotFrameBytes -= img.width * img.height * 4
+            }
         }
         bumpPreviewsCoalesced()
     }
@@ -4042,6 +4143,8 @@ public final class WorkspaceModel: ObservableObject {
             if let jpeg = frame.pairedJpegURL { shotFrameCache[jpeg] = nil }
         }
         shotFrameOrder.removeAll { shotFrameCache[$0] == nil }
+        shotFrameBytes = shotFrameCache.values.reduce(0) { $0 + $1.width * $1.height * 4 }
+        refinedFrame = nil
         shotThumbnails[shot.id] = nil
         scheduleShotThumbnails(for: shot)
         previewVersion += 1
@@ -4157,19 +4260,21 @@ public final class WorkspaceModel: ObservableObject {
     /// nil clears the per-shot override back to the project default.
     // MARK: - Ramp authoring
 
-    /// Hold on the still under the playhead. Duration is preserved by the
-    /// ramp, so the hold is expressed as a share of the clip's length and
-    /// the rest of the shot speeds up around it.
-    public func holdRampOnCurrentStill(holdSeconds: Double, easeShots: Int, ease: Double) {
+    /// Hold on the still under the playhead for `holdFrames` output frames,
+    /// easing in over `easeIn` stills and back out over `easeOut`. Duration
+    /// is preserved by the ramp, so the rest of the shot speeds up.
+    public func holdRampOnCurrentStill(holdFrames: Int, easeIn: Int, easeOut: Int,
+                                       ease: Double, skipAfter: Int = 0) {
         guard let shot = previewShot else { return }
         let frames = playbackFrames(for: shot)
         guard frames.count > 1,
               let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
-        let totalSeconds = Double(ShotTimingEngine.totalFrames(schedule(for: shot))) / shotFrameRate.fps
-        guard totalSeconds > 0 else { return }
+        let total = ShotTimingEngine.totalFrames(schedule(for: shot))
+        guard total > 1 else { return }
         let ramp = RampBuilder.holdRamp(stillIndex: event.frameIndex, stillCount: frames.count,
-                                        holdShare: holdSeconds / totalSeconds,
-                                        easeShots: easeShots, ease: ease)
+                                        holdShare: Double(holdFrames) / Double(total),
+                                        easeIn: easeIn, easeOut: easeOut, ease: ease,
+                                        skipAfter: skipAfter)
         setShotRamp(ramp, for: shot.id)
     }
 

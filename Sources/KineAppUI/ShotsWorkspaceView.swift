@@ -20,6 +20,8 @@ struct ShotsWorkspaceView: View {
             Divider()
             if workspace.orderedShots.isEmpty {
                 emptyDropZone
+            } else if workspace.shotsFullscreen {
+                ShotProcessingView(workspace: workspace)
             } else {
                 KineSplitView(
                     isVertical: true,
@@ -74,6 +76,19 @@ struct ShotsWorkspaceView: View {
                     }
                 }
                 Text("Use every Nth still. Stacks with the timing mode; shots can override it individually.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
+
+            BarValueControl(label: "Preview", value: workspace.previewQuality.label.lowercased()) {
+                ForEach(WorkspaceModel.PreviewQuality.allCases, id: \.self) { q in
+                    BarOptionRow(label: "\(q.label) (\(q.maxPixel) px)",
+                                 selected: workspace.previewQuality == q) {
+                        workspace.setPreviewQuality(q)
+                    }
+                }
+                Text("Playback decode size. Paused frames always refine to near-full quality.")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
@@ -381,7 +396,7 @@ private struct SinglesSection: View {
 
 /// One shot in the grid: a tall filmstrip, name + per-shot timing badge,
 /// and the live stats line. Click to open it in the inspector.
-private struct ShotCard: View {
+struct ShotCard: View {
     @ObservedObject var workspace: WorkspaceModel
     let shot: BurstShot
 

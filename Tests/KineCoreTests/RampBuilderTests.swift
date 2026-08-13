@@ -32,7 +32,7 @@ final class RampBuilderTests: XCTestCase {
 
     func testHoldRampGivesHeldStillItsShare() {
         let points = RampBuilder.holdRamp(stillIndex: 10, stillCount: 21,
-                                          holdShare: 0.4, easeShots: 0, ease: 0)
+                                          holdShare: 0.4, easeIn: 0, easeOut: 0, ease: 0)
         assertMonotone(points)
         let curve = ToneCurve(points)
         // The held still spans source [10/21, 11/21]; find its output width.
@@ -46,10 +46,27 @@ final class RampBuilderTests: XCTestCase {
     }
 
     func testHoldRampClampsAndDegenerates() {
-        XCTAssertTrue(RampBuilder.holdRamp(stillIndex: 0, stillCount: 1, holdShare: 0.5, easeShots: 2, ease: 0.5).isEmpty)
-        XCTAssertTrue(RampBuilder.holdRamp(stillIndex: 9, stillCount: 5, holdShare: 0.5, easeShots: 2, ease: 0.5).isEmpty)
-        let extreme = RampBuilder.holdRamp(stillIndex: 2, stillCount: 10, holdShare: 5.0, easeShots: 3, ease: 1)
+        XCTAssertTrue(RampBuilder.holdRamp(stillIndex: 0, stillCount: 1, holdShare: 0.5, easeIn: 2, easeOut: 2, ease: 0.5).isEmpty)
+        XCTAssertTrue(RampBuilder.holdRamp(stillIndex: 9, stillCount: 5, holdShare: 0.5, easeIn: 2, easeOut: 2, ease: 0.5).isEmpty)
+        let extreme = RampBuilder.holdRamp(stillIndex: 2, stillCount: 10, holdShare: 5.0, easeIn: 3, easeOut: 3, ease: 1)
         assertMonotone(extreme)
+    }
+
+    func testSkipAfterHoldDropsFollowingStills() {
+        var shot = BurstShot(name: "S", frames: (0..<20).map {
+            StillFrame(url: URL(fileURLWithPath: "/s/\($0).jpg"), captureTime: Double($0) * 0.125)
+        })
+        shot.timingOverride = .fixedFramesPerStill(frames: 2)
+        shot.speedRamp = RampBuilder.holdRamp(stillIndex: 8, stillCount: 20,
+                                              holdShare: 0.3, easeIn: 0, easeOut: 0,
+                                              ease: 0, skipAfter: 3)
+        let events = ShotTimingEngine.schedule(for: shot, projectDefault: .default, rate: .twentyFour)
+        let played = Set(events.map(\.frameIndex))
+        XCTAssertTrue(played.contains(8), "held still plays")
+        XCTAssertFalse(played.contains(9), "stills right after the hold are skipped")
+        XCTAssertFalse(played.contains(10))
+        XCTAssertFalse(played.contains(11))
+        XCTAssertTrue(played.contains(12), "cadence resumes past the skip")
     }
 
     func testDownsampleCapsHandleCount() {
@@ -66,7 +83,7 @@ final class RampBuilderTests: XCTestCase {
         shot.timingOverride = .fixedFramesPerStill(frames: 3)
         let flat = ShotTimingEngine.schedule(for: shot, projectDefault: .default, rate: .twentyFour)
         shot.speedRamp = RampBuilder.holdRamp(stillIndex: 12, stillCount: 24,
-                                              holdShare: 0.5, easeShots: 3, ease: 0.5)
+                                              holdShare: 0.5, easeIn: 3, easeOut: 3, ease: 0.5)
         let ramped = ShotTimingEngine.schedule(for: shot, projectDefault: .default, rate: .twentyFour)
         XCTAssertEqual(ShotTimingEngine.totalFrames(ramped), ShotTimingEngine.totalFrames(flat))
     }

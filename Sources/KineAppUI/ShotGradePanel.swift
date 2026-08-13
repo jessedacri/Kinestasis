@@ -9,22 +9,25 @@ import KineMedia
 /// LUT, texture, ramp, looks, and the EXIF of the frame on screen.
 struct ShotGradePanel: View {
     @ObservedObject var workspace: WorkspaceModel
+    /// False in the fullscreen processing view, where the big shared
+    /// player renders elsewhere and this panel is sections only.
+    var showPlayer = true
 
-    @State private var playerImage: CGImage?
-    @State private var renderGeneration = 0
     @State private var exifFields: [ExifReader.Field] = []
     @State private var exifURL: URL?
-    @State private var holdSeconds = 1.0
-    @State private var holdEaseShots = 3
+    @State private var holdFrames = 24
+    @State private var holdEaseIn = 3
+    @State private var holdEaseOut = 3
     @State private var holdEase = 0.5
-
-    private let renderer = ShotGradeRenderer()
+    @State private var holdSkipAfter = 0
 
     var body: some View {
         if let shot = workspace.selectedShot {
             VStack(spacing: 0) {
-                playerArea(workspace.previewShot ?? shot)
-                Divider()
+                if showPlayer {
+                    ShotPlayerView(workspace: workspace)
+                    Divider()
+                }
                 ThinScrollView(axis: .vertical) {
                     VStack(alignment: .leading, spacing: 10) {
                         timingSection(shot)
@@ -50,19 +53,16 @@ struct ShotGradePanel: View {
             }
             .onAppear {
                 workspace.prefetchPreviewFrames(for: shot)
-                rerenderPlayer(shot)
+                refreshCurrentExif()
             }
-            .onChange(of: shot.grade) { _, _ in rerenderPlayer(shot) }
             .onChange(of: shot.id) { _, _ in
                 workspace.shotStop()
                 workspace.shotPlayheadFrame = 0
                 workspace.prefetchPreviewFrames(for: shot)
-                rerenderPlayer(shot)
+                refreshCurrentExif()
             }
-            .onReceive(workspace.shotTransport.$playheadFrame) { _ in rerenderPlayer(shot) }
-            .onChange(of: workspace.previewVersion) { _, _ in rerenderPlayer(shot) }
-            .onChange(of: shot.useJpegSource) { _, _ in rerenderPlayer(shot) }
-            .onChange(of: workspace.skimShotID) { _, _ in rerenderPlayer(shot) }
+            .onReceive(workspace.shotTransport.$playheadFrame) { _ in refreshCurrentExif() }
+            .onChange(of: workspace.skimShotID) { _, _ in refreshCurrentExif() }
         } else {
             VStack(spacing: 6) {
                 Image(systemName: "camera.aperture")
@@ -78,175 +78,8 @@ struct ShotGradePanel: View {
         }
     }
 
-    // MARK: - Player
-
-    private func playerArea(_ shot: BurstShot) -> some View {
-        let schedule = workspace.scheduleForPreviewShot()
-        let total = max(1, ShotTimingEngine.totalFrames(schedule))
-        let fps = workspace.shotFrameRate.fps
-        return VStack(spacing: 0) {
-            ZStack {
-                Color.black
-                if let playerImage {
-                    Image(decorative: playerImage, scale: 1)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                } else {
-                    ProgressView().controlSize(.small)
-                }
-                if workspace.shotPlayRate != 0 {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            Text(shuttleLabel)
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.black.opacity(0.55))
-                                .clipShape(Capsule())
-                                .foregroundStyle(.white)
-                                .padding(8)
-                        }
-                        Spacer()
-                    }
-                }
-            }
-            .frame(minHeight: 160, idealHeight: 240)
-            .contentShape(Rectangle())
-            .onTapGesture { workspace.toggleShotPlayback() }
-
-            HStack(spacing: 8) {
-                Button {
-                    workspace.toggleShotPlayback()
-                } label: {
-                    Image(systemName: workspace.shotPlayRate != 0 ? "pause.fill" : "play.fill")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.plain)
-
-                Text(String(format: "%d / %d", workspace.shotPlayheadFrame + 1, total))
-                    .font(KineTheme.monoSmall)
-                    .foregroundStyle(KineTheme.textMuted)
-                    .frame(width: 74, alignment: .leading)
-
-                PlayerScrubBar(
-                    fraction: Binding(
-                        get: { Double(workspace.shotPlayheadFrame) / Double(max(1, total - 1)) },
-                        set: { f in
-                            workspace.shotStop()
-                            workspace.shotPlayheadFrame = Int64((f * Double(total - 1)).rounded())
-                        }
-                    )
-                )
-
-                Text(String(format: "%.1fs", Double(total) / fps))
-                    .font(KineTheme.monoSmall)
-                    .foregroundStyle(KineTheme.textMuted)
-
-                Divider().frame(height: 12)
-
-                Button("I") { workspace.setShotTrimInAtPlayhead() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(KineTheme.accent)
-                    .help("Trim head to this still (key: I)")
-                Button("O") { workspace.setShotTrimOutAtPlayhead() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(KineTheme.accent)
-                    .help("Trim tail to this still (key: O)")
-                if shot.isTrimmed {
-                    Text("\(shot.effectiveFrames.count)/\(shot.frames.count)")
-                        .font(KineTheme.monoSmall)
-                        .foregroundStyle(KineTheme.textMuted)
-                    Button {
-                        workspace.clearShotTrim()
-                    } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 9))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear trim")
-                }
-
-                if let current = workspace.currentShotFrame() {
-                    let marked = current.shot.markedStillIDs.contains(current.frame.id)
-                    Divider().frame(height: 12)
-                    Button {
-                        workspace.toggleStillMark(current.frame.id, in: current.shot.id)
-                    } label: {
-                        Image(systemName: marked ? "star.fill" : "star")
-                            .font(.system(size: 10))
-                            .foregroundStyle(marked ? KineTheme.accent : KineTheme.textMuted)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Mark this still for export (key: M)")
-                    if current.shot.markedStillIDs.count > 0 {
-                        Text("\(current.shot.markedStillIDs.count)")
-                            .font(KineTheme.monoSmall)
-                            .foregroundStyle(KineTheme.textMuted)
-                    }
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(KineTheme.bgPanel)
-
-            // Where the kept range sits inside the full shot: dark ends
-            // are trimmed off and never play in the loop.
-            if shot.isTrimmed, !shot.frames.isEmpty {
-                GeometryReader { geo in
-                    let n = CGFloat(shot.frames.count)
-                    let x0 = CGFloat(shot.trimIn) / n * geo.size.width
-                    let x1 = CGFloat(shot.frames.count - shot.trimOut) / n * geo.size.width
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.black.opacity(0.5))
-                        Capsule().fill(KineTheme.accent.opacity(0.85))
-                            .frame(width: max(2, x1 - x0))
-                            .offset(x: x0)
-                    }
-                }
-                .frame(height: 3)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 6)
-                .background(KineTheme.bgPanel)
-                .help("Kept range inside the full shot. Dark ends are trimmed off and do not play.")
-            }
-        }
-    }
-
-    private var shuttleLabel: String {
-        let r = workspace.shotPlayRate
-        return (r < 0 ? "◀ " : "▶ ") + (abs(r) == 1 ? "1×" : String(format: "%g×", abs(r)))
-    }
-
-    /// Live frame: cached base preview + grade applied on top (fast CI
-    /// chain — sliders and playback stay realtime; export is the exact
-    /// RAW develop).
-    private func rerenderPlayer(_ shot: BurstShot) {
-        // The player follows the skim when there is one; the passed-in
-        // (selected) shot only drives the inspector sections.
-        let shot = workspace.previewShot ?? shot
-        guard let url = workspace.currentShotFrameURL() else { playerImage = nil; return }
-        refreshExif(url)
-        guard let base = workspace.cachedPreviewFrame(url) else {
-            workspace.requestPreviewFrame(url)
-            return   // previewVersion bump re-triggers when the decode lands
-        }
-        let grade = shot.grade
-        let seed = workspace.shotPlayheadFrame
-        let ev = ExposureWobble.evOffset(
-            outputFrame: seed, fps: workspace.shotFrameRate.fps,
-            intensity: grade.wobbleIntensity, rate: grade.wobbleRate)
-        renderGeneration += 1
-        let generation = renderGeneration
-        let renderer = renderer
-        Task.detached(priority: .userInitiated) {
-            let image = renderer.gradePreview(base, grade: grade, evOffset: ev, grainSeed: seed) ?? base
-            await MainActor.run {
-                if generation == self.renderGeneration { self.playerImage = image }
-            }
-        }
+    private func refreshCurrentExif() {
+        if let url = workspace.currentShotFrameURL() { refreshExif(url) }
     }
 
     private func refreshExif(_ url: URL) {
@@ -519,21 +352,32 @@ struct ShotGradePanel: View {
 
             HStack(spacing: 8) {
                 Menu {
-                    ForEach([0.5, 1.0, 1.5, 2.0, 3.0], id: \.self) { s in
-                        Button(String(format: "%.1fs", s)) { holdSeconds = s }
+                    ForEach([6, 12, 18, 24, 36, 48, 72], id: \.self) { f in
+                        Button(holdFramesLabel(f)) { holdFrames = f }
                     }
                 } label: {
-                    Text(String(format: "Hold %.1fs", holdSeconds)).font(.system(size: 10))
+                    Text("Hold \(holdFrames)f").font(.system(size: 10))
                 }
                 .fixedSize()
+                .help("How many output frames the held still occupies")
                 Menu {
                     ForEach([0, 1, 2, 3, 5, 8], id: \.self) { n in
-                        Button("\(n) shot\(n == 1 ? "" : "s")") { holdEaseShots = n }
+                        Button("\(n) still\(n == 1 ? "" : "s")") { holdEaseIn = n }
                     }
                 } label: {
-                    Text("Ease over \(holdEaseShots)").font(.system(size: 10))
+                    Text("In \(holdEaseIn)").font(.system(size: 10))
                 }
                 .fixedSize()
+                .help("Stills that slow down into the hold")
+                Menu {
+                    ForEach([0, 1, 2, 3, 5, 8], id: \.self) { n in
+                        Button("\(n) still\(n == 1 ? "" : "s")") { holdEaseOut = n }
+                    }
+                } label: {
+                    Text("Out \(holdEaseOut)").font(.system(size: 10))
+                }
+                .fixedSize()
+                .help("Stills that race back out of the hold")
                 Menu {
                     Button("Gentle") { holdEase = 0.15 }
                     Button("Medium") { holdEase = 0.5 }
@@ -542,15 +386,29 @@ struct ShotGradePanel: View {
                     Text(easeLabel).font(.system(size: 10))
                 }
                 .fixedSize()
+                Menu {
+                    ForEach([0, 1, 2, 3, 5, 8, 12], id: \.self) { n in
+                        Button(n == 0 ? "None" : "\(n) still\(n == 1 ? "" : "s")") { holdSkipAfter = n }
+                    }
+                } label: {
+                    Text("Then skip \(holdSkipAfter)").font(.system(size: 10))
+                }
+                .fixedSize()
+                .help("Drop this many stills when the hold releases, as if the cadence kept running underneath")
                 Spacer()
                 Button("Hold on This Still") {
                     workspace.holdRampOnCurrentStill(
-                        holdSeconds: holdSeconds, easeShots: holdEaseShots, ease: holdEase)
+                        holdFrames: holdFrames, easeIn: holdEaseIn, easeOut: holdEaseOut,
+                        ease: holdEase, skipAfter: holdSkipAfter)
                 }
                 .font(.system(size: 10, weight: .semibold))
                 .help("Linger on the still under the playhead; the rest of the shot speeds up around it")
             }
         }
+    }
+
+    private func holdFramesLabel(_ frames: Int) -> String {
+        String(format: "%d frames (%.1fs)", frames, Double(frames) / workspace.shotFrameRate.fps)
     }
 
     private var easeLabel: String {
@@ -639,7 +497,7 @@ struct ShotGradePanel: View {
 }
 
 /// Slim scrub bar for the shot player.
-private struct PlayerScrubBar: View {
+struct PlayerScrubBar: View {
     @Binding var fraction: Double
 
     var body: some View {

@@ -214,7 +214,10 @@ public struct KineRootView: View {
         let held = heldChordKeys
         let monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
             if event.type == .keyUp {
-                if let chars = event.charactersIgnoringModifiers { held.keys.remove(chars.lowercased()) }
+                if let chars = event.charactersIgnoringModifiers {
+                    held.keys.remove(chars.lowercased())
+                    if let token = Self.glyphToken(chars) { workspace.pressedKeys.remove(token) }
+                }
                 return event
             }
 
@@ -228,6 +231,9 @@ public struct KineRootView: View {
 
             if !event.isARepeat, HeldChordKeys.tracked.contains(chars.lowercased()) {
                 held.keys.insert(chars.lowercased())
+            }
+            if !event.isARepeat, !isCommand, let token = Self.glyphToken(chars) {
+                workspace.pressedKeys.insert(token)
             }
 
             // Shots workspace: transport acts on the focused (hovered /
@@ -270,6 +276,18 @@ public struct KineRootView: View {
                 case "m":
                     workspace.toggleStillMarkAtPlayhead()
                     return nil
+                case String(Character(UnicodeScalar(NSUpArrowFunctionKey)!)):
+                    workspace.selectAdjacentShot(-1)
+                    return nil
+                case String(Character(UnicodeScalar(NSDownArrowFunctionKey)!)):
+                    workspace.selectAdjacentShot(1)
+                    return nil
+                case "\u{1B}":
+                    if workspace.shotsFullscreen {
+                        setShotsFullscreen(false)
+                        return nil
+                    }
+                    break
                 default:
                     break
                 }
@@ -301,7 +319,11 @@ public struct KineRootView: View {
                     if isShift { workspace.redo() } else { workspace.undo() }
                     return nil
                 case "f":
-                    setProgramFullscreen(!workspace.programFullscreen)
+                    if workspace.appMode == .shots {
+                        setShotsFullscreen(!workspace.shotsFullscreen)
+                    } else {
+                        setProgramFullscreen(!workspace.programFullscreen)
+                    }
                     return nil
                 default:
                     return event
@@ -459,6 +481,28 @@ public struct KineRootView: View {
     final class HeldChordKeys {
         static let tracked: Set<String> = ["j", "k", "l", "i", "o"]
         var keys: Set<String> = []
+    }
+
+    /// The processing view's glyph bar lights these while held.
+    private static func glyphToken(_ chars: String) -> String? {
+        switch chars.lowercased() {
+        case " ": return "space"
+        case "j", "k", "l", "i", "o", "m": return chars.lowercased()
+        case String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!)): return "left"
+        case String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)): return "right"
+        case String(Character(UnicodeScalar(NSUpArrowFunctionKey)!)): return "up"
+        case String(Character(UnicodeScalar(NSDownArrowFunctionKey)!)): return "down"
+        default: return nil
+        }
+    }
+
+    /// The Shots processing view and native window fullscreen move
+    /// together, so Cmd+F reads as one gesture.
+    private func setShotsFullscreen(_ on: Bool) {
+        workspace.shotsFullscreen = on
+        let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.contentView != nil })
+        let isFS = win?.styleMask.contains(.fullScreen) ?? false
+        if on != isFS { win?.toggleFullScreen(nil) }
     }
 
     private func removeKeyMonitor() {
