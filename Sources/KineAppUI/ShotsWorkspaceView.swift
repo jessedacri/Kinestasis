@@ -137,6 +137,23 @@ struct ShotsWorkspaceView: View {
                 }
             }
 
+            if let p = workspace.previewPrimeProgress {
+                ProgressView(value: Double(p.done), total: Double(max(1, p.total)))
+                    .controlSize(.small).frame(width: 110)
+                Text("Generating previews \(p.done.formatted()) / \(p.total.formatted())")
+                    .font(KineTheme.monoSmall)
+                    .foregroundStyle(.secondary)
+                Button {
+                    workspace.cancelPreviewPriming()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Stop generating previews (frames still load on demand)")
+            }
+
             if let progress = workspace.shotExportProgress {
                 ProgressView(value: progress).controlSize(.small).frame(width: 110)
                 Text(workspace.shotBatchLabel ?? "Rendering…")

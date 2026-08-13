@@ -3636,6 +3636,7 @@ public final class WorkspaceModel: ObservableObject {
         if !result.shots.isEmpty || !result.singles.isEmpty {
             project.modifiedAt = Date()
             markDirty()
+            primeAllPreviews()
         }
         for video in result.videos {
             await ingestSingle(url: video)
@@ -4051,6 +4052,9 @@ public final class WorkspaceModel: ObservableObject {
         previewPendingSet = []
         previewVersion += 1
         if let shot = previewShot { prefetchPreviewFrames(for: shot) }
+        // Regenerate in the background with the same visible progress
+        // bar as import; on-screen frames sharpen in place meanwhile.
+        primeAllPreviews()
     }
 
     // MARK: - Paused refinement (near-full quality when parked)
@@ -4093,6 +4097,45 @@ public final class WorkspaceModel: ObservableObject {
         shotFrameCache[url]?.image
     }
 
+    /// Import-time priming: every frame queued oldest-shot-first, decoded
+    /// whenever the user-facing LIFO queue is idle, with visible progress.
+    /// Capped at what the cache budget can hold - priming past the budget
+    /// would just evict itself.
+    private var primeQueue: [URL] = []
+    private var primeTotal = 0
+    @Published public var previewPrimeProgress: (done: Int, total: Int)?
+
+    public func primeAllPreviews() {
+        let bytesPerFrame: Int
+        switch previewQuality {
+        case .draft: bytesPerFrame = 600_000
+        case .balanced: bytesPerFrame = 2_600_000
+        case .high: bytesPerFrame = 18_000_000
+        }
+        let capacity = max(50, shotFrameByteBudget / bytesPerFrame)
+        var urls: [URL] = []
+        outer: for shot in orderedShots {
+            for frame in shot.frames {
+                urls.append(shot.sourceURL(for: frame))
+                if urls.count >= capacity { break outer }
+            }
+        }
+        guard !urls.isEmpty else { return }
+        primeQueue = urls.reversed()   // popped from the end = shot order
+        primeTotal = urls.count
+        updatePrimeProgress()
+        pumpPreviewDecodes()
+    }
+
+    public func cancelPreviewPriming() {
+        primeQueue = []
+        previewPrimeProgress = nil
+    }
+
+    private func updatePrimeProgress() {
+        previewPrimeProgress = primeQueue.isEmpty ? nil : (primeTotal - primeQueue.count, primeTotal)
+    }
+
     /// Decode requests wait here; a small worker pool drains it LIFO so
     /// the frame under the cursor always decodes next. Unbounded
     /// userInitiated fan-out (160 decodes per hovered shot) is what
@@ -4121,9 +4164,15 @@ public final class WorkspaceModel: ObservableObject {
         let maxPixel = shotFramePixels
         let fullDecode = previewQuality.usesFullDecode
         let epoch = cacheEpoch
-        while previewActiveCount < Self.previewMaxConcurrent, !previewPending.isEmpty {
-            let url = previewPending.removeLast()
-            previewPendingSet.remove(url)
+        while previewActiveCount < Self.previewMaxConcurrent, !previewPending.isEmpty || !primeQueue.isEmpty {
+            let url: URL
+            if !previewPending.isEmpty {
+                url = previewPending.removeLast()
+                previewPendingSet.remove(url)
+            } else {
+                url = primeQueue.removeLast()
+                updatePrimeProgress()
+            }
             if let entry = shotFrameCache[url], entry.epoch == epoch { continue }
             guard !shotFramesInFlight.contains(url) else { continue }
             shotFramesInFlight.insert(url)
