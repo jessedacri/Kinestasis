@@ -175,9 +175,11 @@ public final class SequenceEncoder {
     nonisolated(unsafe) private var isCancelled: Bool = false
 
     private let burstTiming: ShotTimingMode
+    private let burstSkip: Int
 
-    public init(sequence: Sequence, mediaPool: MediaPool, burstTiming: ShotTimingMode = .default) throws {
+    public init(sequence: Sequence, mediaPool: MediaPool, burstTiming: ShotTimingMode = .default, burstSkip: Int = 1) throws {
         self.burstTiming = burstTiming
+        self.burstSkip = max(1, burstSkip)
         self.sequence = sequence
         self.mediaPool = mediaPool
     }
@@ -220,7 +222,8 @@ public final class SequenceEncoder {
             compositor = try OfflineSequenceCompositor(
                 sequence: sequence, mediaPool: mediaPool,
                 outputWidth: width, outputHeight: height,
-                burstTiming: burstTiming
+                burstTiming: burstTiming,
+                burstSkip: burstSkip
             )
             self.compositor = compositor
 

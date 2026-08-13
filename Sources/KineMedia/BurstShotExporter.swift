@@ -124,10 +124,11 @@ public struct BurstShotExporter: Sendable {
         filename: String? = nil,
         maxLongEdge: Int? = nil,
         bitrateMbps: Int? = nil,
+        skipDefault: Int = 1,
         isCancelled: @Sendable () -> Bool = { false },
         progress: @Sendable (Double) -> Void = { _ in }
     ) throws -> URL {
-        let frames = shot.playbackFrames
+        let frames = shot.playbackFrames(skipDefault: skipDefault)
         let schedule = ShotTimingEngine.applyRamp(
             ShotTimingEngine.schedule(frames: frames, mode: mode, rate: rate),
             ramp: shot.speedRamp)

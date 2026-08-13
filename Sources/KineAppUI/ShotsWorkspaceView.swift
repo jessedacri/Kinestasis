@@ -66,6 +66,19 @@ struct ShotsWorkspaceView: View {
                 }
             }
 
+            BarValueControl(label: "Skip", value: skipValueLabel(workspace.project.settings.burst.frameSkip)) {
+                ForEach([1, 2, 3, 4, 6, 8], id: \.self) { n in
+                    BarOptionRow(label: skipLabel(n),
+                                 selected: workspace.project.settings.burst.frameSkip == n) {
+                        workspace.setDefaultFrameSkip(n)
+                    }
+                }
+                Text("Use every Nth still. Stacks with the timing mode; shots can override it individually.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
+
             BarValueControl(label: "Split gap", value: gapLabel(workspace.project.settings.burst.gapThreshold)) {
                 ForEach([0.5, 1.0, 2.0, 3.0, 5.0, 10.0], id: \.self) { gap in
                     BarOptionRow(label: gapLabel(gap),
@@ -142,6 +155,11 @@ struct ShotsWorkspaceView: View {
 
     private func gapLabel(_ gap: Double) -> String {
         String(format: gap < 1 ? "%.1f s" : "%.0f s", gap)
+    }
+
+    /// Compact bar value: "off" when every still plays, else "every 2nd".
+    private func skipValueLabel(_ n: Int) -> String {
+        n <= 1 ? "off" : skipLabel(n).lowercased().replacingOccurrences(of: " still", with: "")
     }
 
     // MARK: - Shot grid (sectioned by capture day)
@@ -390,7 +408,7 @@ private struct ShotCard: View {
         let total = ShotTimingEngine.totalFrames(sched)
         guard total > 0 else { return nil }
         let f = Int64((fraction * Double(total - 1)).rounded())
-        let playable = shot.playbackFrames
+        let playable = workspace.playbackFrames(for: shot)
         guard let event = ShotTimingEngine.event(at: f, in: sched),
               playable.indices.contains(event.frameIndex) else { return nil }
         return shot.sourceURL(for: playable[event.frameIndex])
@@ -467,7 +485,10 @@ private struct ShotCard: View {
                 }
             }
             Menu("Frame Skip") {
-                FrameSkipPicker(current: shot.frameSkip) { workspace.setShotFrameSkip($0, for: shot.id) }
+                FrameSkipPicker(current: shot.frameSkipOverride, allowDefault: true,
+                                projectDefault: workspace.project.settings.burst.frameSkip) {
+                    workspace.setShotFrameSkip($0, for: shot.id)
+                }
             }
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
             Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
@@ -592,7 +613,8 @@ private struct ShotCard: View {
 
     private var statsLine: String {
         let seconds = Double(ShotTimingEngine.totalFrames(schedule)) / rate.fps
-        let skip = shot.frameSkip > 1 ? " · skip \(shot.frameSkip)" : ""
+        let resolvedSkip = workspace.resolvedFrameSkip(for: shot)
+        let skip = resolvedSkip > 1 ? " · skip \(resolvedSkip)" : ""
         return String(format: "%.1fs · %@%@ · %@", seconds, timingModeLabel(mode), skip, shot.fileTypeLabel)
     }
 }

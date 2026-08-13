@@ -1684,7 +1684,7 @@ public final class WorkspaceModel: ObservableObject {
 
         let encoder: SequenceEncoder
         do {
-            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool, burstTiming: project.settings.burst.timing)
+            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool, burstTiming: project.settings.burst.timing, burstSkip: project.settings.burst.frameSkip)
         } catch {
             renderError = error.localizedDescription
             return
@@ -1790,7 +1790,7 @@ public final class WorkspaceModel: ObservableObject {
 
         let encoder: SequenceEncoder
         do {
-            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool, burstTiming: project.settings.burst.timing)
+            encoder = try SequenceEncoder(sequence: sequence, mediaPool: project.mediaPool, burstTiming: project.settings.burst.timing, burstSkip: project.settings.burst.frameSkip)
         } catch {
             renderError = error.localizedDescription
             return
@@ -4095,11 +4095,12 @@ public final class WorkspaceModel: ObservableObject {
         hasher.combine(shot.frames.count)
         hasher.combine(shot.trimIn)
         hasher.combine(shot.trimOut)
-        hasher.combine(shot.frameSkip)
+        hasher.combine(resolvedFrameSkip(for: shot))
         let key = hasher.finalize()
         if let cached = scheduleCache[shot.id], cached.key == key { return cached.schedule }
         let schedule = ShotTimingEngine.schedule(
-            for: shot, projectDefault: project.settings.burst.timing, rate: shotFrameRate)
+            for: shot, projectDefault: project.settings.burst.timing,
+            skipDefault: project.settings.burst.frameSkip, rate: shotFrameRate)
         scheduleCache[shot.id] = (key, schedule)
         return schedule
     }
@@ -4124,7 +4125,7 @@ public final class WorkspaceModel: ObservableObject {
         guard let shot = previewShot,
               let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
         var updated = shot
-        updated.trimIn = min(shot.frames.count - 1, shot.trimIn + event.frameIndex * max(1, shot.frameSkip))
+        updated.trimIn = min(shot.frames.count - 1, shot.trimIn + event.frameIndex * resolvedFrameSkip(for: shot))
         updated.trimOut = min(updated.trimOut, shot.frames.count - 1 - updated.trimIn)
         applyTrim(updated)
     }
@@ -4134,7 +4135,7 @@ public final class WorkspaceModel: ObservableObject {
         guard let shot = previewShot,
               let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
         var updated = shot
-        let absoluteIndex = shot.trimIn + event.frameIndex * max(1, shot.frameSkip)
+        let absoluteIndex = shot.trimIn + event.frameIndex * resolvedFrameSkip(for: shot)
         updated.trimOut = max(0, shot.frames.count - 1 - absoluteIndex)
         updated.trimIn = min(updated.trimIn, shot.frames.count - 1 - updated.trimOut)
         applyTrim(updated)
@@ -4153,13 +4154,32 @@ public final class WorkspaceModel: ObservableObject {
         markDirty()
     }
 
-    public func setShotFrameSkip(_ every: Int, for id: ShotID) {
-        guard var shot = project.mediaPool.shots[id], shot.frameSkip != max(1, every) else { return }
-        shot.frameSkip = max(1, every)
+    /// nil clears the per-shot override back to the project default.
+    public func setShotFrameSkip(_ every: Int?, for id: ShotID) {
+        guard var shot = project.mediaPool.shots[id] else { return }
+        let override = every.map { max(1, $0) }
+        guard shot.frameSkipOverride != override else { return }
+        shot.frameSkipOverride = override
         project.mediaPool.shots[id] = shot
         shotPlayheadFrame = 0
         project.modifiedAt = Date()
         markDirty()
+    }
+
+    public func setDefaultFrameSkip(_ every: Int) {
+        project.settings.burst.frameSkip = max(1, every)
+        shotPlayheadFrame = 0
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    public func resolvedFrameSkip(for shot: BurstShot) -> Int {
+        shot.frameSkip(projectDefault: project.settings.burst.frameSkip)
+    }
+
+    /// The stills a shot actually plays under the current project defaults.
+    public func playbackFrames(for shot: BurstShot) -> [StillFrame] {
+        shot.playbackFrames(skipDefault: project.settings.burst.frameSkip)
     }
 
     public func toggleShotPlayback() {
@@ -4246,7 +4266,7 @@ public final class WorkspaceModel: ObservableObject {
     /// RAW/JPEG source toggle.
     public func currentShotFrameURL() -> URL? {
         guard let shot = previewShot else { return nil }
-        let frames = shot.playbackFrames
+        let frames = playbackFrames(for: shot)
         guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)),
               frames.indices.contains(event.frameIndex) else { return nil }
         return shot.sourceURL(for: frames[event.frameIndex])
@@ -4327,6 +4347,7 @@ public final class WorkspaceModel: ObservableObject {
         guard !shots.isEmpty, shotExportProgress == nil else { return }
 
         let defaults = project.settings.burst.timing
+        let skipDefault = project.settings.burst.frameSkip
         let rate = shotFrameRate
         let exporter = BurstShotExporter()
         shotExportProgress = 0
@@ -4353,10 +4374,11 @@ public final class WorkspaceModel: ObservableObject {
                         filename: filename,
                         maxLongEdge: longEdge,
                         bitrateMbps: bitrateMbps,
+                        skipDefault: skipDefault,
                         isCancelled: { cancel.isCancelled }
                     )
                     if cancel.isCancelled { break }
-                    let schedule = ShotTimingEngine.schedule(for: shot, projectDefault: defaults, rate: rate)
+                    let schedule = ShotTimingEngine.schedule(for: shot, projectDefault: defaults, skipDefault: skipDefault, rate: rate)
                     let size = shot.frames.first?.pixelSize ?? PixelSize(width: 1920, height: 1080)
                     sidecarEntries.append(ShotBatchXMLSidecar.Entry(
                         shot: shot, movieURL: movieURL,

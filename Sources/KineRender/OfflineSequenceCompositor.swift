@@ -155,11 +155,13 @@ public final class OfflineSequenceCompositor {
         outputWidth: Int? = nil,
         outputHeight: Int? = nil,
         burstTiming: ShotTimingMode = .default,
+        burstSkip: Int = 1,
         stillPreviewLongEdge: Int? = nil
     ) throws {
         self.sequence = sequence
         self.mediaPool = mediaPool
         self.burstTiming = burstTiming
+        self.burstSkip = max(1, burstSkip)
         self.stillPreviewLongEdge = stillPreviewLongEdge
         self.outputWidth  = outputWidth  ?? sequence.settings.resolution.width
         self.outputHeight = outputHeight ?? sequence.settings.resolution.height
@@ -1128,6 +1130,8 @@ public final class OfflineSequenceCompositor {
     /// Project-level default timing for burst shots placed on the
     /// timeline (per-shot overrides live on the shot itself).
     public var burstTiming: ShotTimingMode
+    /// Project-default frame skip for shots without a per-shot override.
+    public var burstSkip: Int
     /// Longest-edge cap for still develops in realtime preview; nil =
     /// native resolution (export).
     public let stillPreviewLongEdge: Int?
@@ -1144,7 +1148,8 @@ public final class OfflineSequenceCompositor {
             }
             fs = ShotFrameSource(shot: shot, defaultTiming: burstTiming,
                                  rate: sequence.settings.frameRate,
-                                 maxPixel: stillPreviewLongEdge ?? 100_000)
+                                 maxPixel: stillPreviewLongEdge ?? 100_000,
+                                 skipDefault: burstSkip)
         } else {
             do {
                 fs = try await AVAssetFrameSource.load(url: source.url)

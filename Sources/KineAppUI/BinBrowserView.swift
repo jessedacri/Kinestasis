@@ -309,7 +309,10 @@ private struct BurstShotRow: View {
                 }
             }
             Menu("Frame Skip") {
-                FrameSkipPicker(current: shot.frameSkip) { workspace.setShotFrameSkip($0, for: shot.id) }
+                FrameSkipPicker(current: shot.frameSkipOverride, allowDefault: true,
+                                projectDefault: workspace.project.settings.burst.frameSkip) {
+                    workspace.setShotFrameSkip($0, for: shot.id)
+                }
             }
             Button("Grade…") { workspace.selectShot(shot.id) }
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
@@ -535,12 +538,28 @@ struct TimingModePicker: View {
 }
 
 /// Frame skip is its own setting, not a timing mode, so it composes with
-/// as-shot speeds and fixed frames-per-still.
+/// as-shot speeds and fixed frames-per-still. `current` nil = the shot
+/// follows the project default.
 struct FrameSkipPicker: View {
-    let current: Int
-    let onPick: (Int) -> Void
+    let current: Int?
+    var allowDefault = false
+    var projectDefault = 1
+    let onPick: (Int?) -> Void
 
     var body: some View {
+        if allowDefault {
+            Button {
+                onPick(nil)
+            } label: {
+                let label = "Use Project Default (\(skipLabel(projectDefault).lowercased()))"
+                if current == nil {
+                    Label(label, systemImage: "checkmark")
+                } else {
+                    Text(label)
+                }
+            }
+            Divider()
+        }
         ForEach([1, 2, 3, 4, 6, 8], id: \.self) { n in
             Button {
                 onPick(n)

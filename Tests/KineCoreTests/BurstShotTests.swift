@@ -125,13 +125,13 @@ final class BurstShotTests: XCTestCase {
 
     func testBurstShotCodableRoundTrip() throws {
         let shot = BurstShot(name: "S1", frames: [frame(0), frame(0.25)],
-                             timingOverride: .asShot(rate: 0.5), frameSkip: 3)
+                             timingOverride: .asShot(rate: 0.5), frameSkipOverride: 3)
         let data = try JSONEncoder().encode(shot)
         let back = try JSONDecoder().decode(BurstShot.self, from: data)
         XCTAssertEqual(back.name, shot.name)
         XCTAssertEqual(back.frames.map(\.captureTime), shot.frames.map(\.captureTime))
         XCTAssertEqual(back.timingOverride, shot.timingOverride)
-        XCTAssertEqual(back.frameSkip, 3)
+        XCTAssertEqual(back.frameSkipOverride, 3)
     }
 
     func testLegacyFrameSkipTimingMigratesToOrthogonalSkip() throws {
@@ -139,31 +139,36 @@ final class BurstShotTests: XCTestCase {
                             timingOverride: .frameSkip(every: 2, frames: 3))
         let back = try JSONDecoder().decode(BurstShot.self, from: JSONEncoder().encode(old))
         XCTAssertEqual(back.timingOverride, .fixedFramesPerStill(frames: 3))
-        XCTAssertEqual(back.frameSkip, 2)
+        XCTAssertEqual(back.frameSkipOverride, 2)
     }
 
     func testLegacyFrameSkipDefaultTimingMigrates() throws {
         let old = BurstDefaults(gapThreshold: 2, timing: .frameSkip(every: 3, frames: 4))
         let back = try JSONDecoder().decode(BurstDefaults.self, from: JSONEncoder().encode(old))
         XCTAssertEqual(back.timing, .fixedFramesPerStill(frames: 4))
+        XCTAssertEqual(back.frameSkip, 3)
     }
 
     // MARK: - Orthogonal frame skip
 
     func testPlaybackFramesComposeTrimAndSkip() {
         var shot = BurstShot(name: "S", frames: (0..<12).map { frame(Double($0)) })
-        shot.trimIn = 2; shot.trimOut = 2   // keeps 2...9
-        shot.frameSkip = 3                  // keeps 2, 5, 8
-        XCTAssertEqual(shot.playbackFrames.map(\.captureTime), [2.0, 5.0, 8.0])
-        shot.frameSkip = 1
-        XCTAssertEqual(shot.playbackFrames.count, 8)
+        shot.trimIn = 2; shot.trimOut = 2         // keeps 2...9
+        shot.frameSkipOverride = 3                // keeps 2, 5, 8
+        XCTAssertEqual(shot.playbackFrames().map(\.captureTime), [2.0, 5.0, 8.0])
+        shot.frameSkipOverride = nil
+        XCTAssertEqual(shot.playbackFrames().count, 8)
+        // No override: the project default applies; an override beats it.
+        XCTAssertEqual(shot.playbackFrames(skipDefault: 4).map(\.captureTime), [2.0, 6.0])
+        shot.frameSkipOverride = 2
+        XCTAssertEqual(shot.playbackFrames(skipDefault: 4).map(\.captureTime), [2.0, 4.0, 6.0, 8.0])
     }
 
     func testFrameSkipComposesWithAsShotTiming() {
         // 10 fps burst, skip every 2nd, real time: kept stills are 0.2s
         // apart, so each holds ~5 frames at 24p and the span is preserved.
         var shot = BurstShot(name: "S", frames: (0..<10).map { frame(Double($0) * 0.1) })
-        shot.frameSkip = 2
+        shot.frameSkipOverride = 2
         shot.timingOverride = .asShot(rate: 1.0)
         let events = ShotTimingEngine.schedule(for: shot, projectDefault: .default, rate: .twentyFour)
         XCTAssertEqual(events.count, 5)
@@ -173,7 +178,7 @@ final class BurstShotTests: XCTestCase {
 
     func testFrameSkipComposesWithFixedTiming() {
         var shot = BurstShot(name: "S", frames: (0..<9).map { frame(Double($0)) })
-        shot.frameSkip = 4
+        shot.frameSkipOverride = 4
         shot.timingOverride = .fixedFramesPerStill(frames: 2)
         let events = ShotTimingEngine.schedule(for: shot, projectDefault: .default, rate: .twentyFour)
         XCTAssertEqual(events.map(\.frameIndex), [0, 1, 2])   // indexes playbackFrames

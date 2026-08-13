@@ -261,9 +261,14 @@ struct ShotGradePanel: View {
                 }
                 .fixedSize()
                 Menu {
-                    FrameSkipPicker(current: shot.frameSkip) { workspace.setShotFrameSkip($0, for: shot.id) }
+                    FrameSkipPicker(current: shot.frameSkipOverride, allowDefault: true,
+                                    projectDefault: workspace.project.settings.burst.frameSkip) {
+                        workspace.setShotFrameSkip($0, for: shot.id)
+                    }
                 } label: {
-                    Label(skipLabel(shot.frameSkip), systemImage: "square.3.layers.3d.middle.filled")
+                    Label(skipLabel(workspace.resolvedFrameSkip(for: shot))
+                              + (shot.frameSkipOverride == nil ? "  (project default)" : ""),
+                          systemImage: "square.3.layers.3d.middle.filled")
                         .font(.system(size: 11))
                 }
                 .fixedSize()
@@ -295,8 +300,9 @@ struct ShotGradePanel: View {
                 bits.append(String(format: "shot over %.1fs", shot.captureSpan))
             }
         }
-        if shot.frameSkip > 1 {
-            bits.append(skipLabel(shot.frameSkip).lowercased())
+        let resolvedSkip = workspace.resolvedFrameSkip(for: shot)
+        if resolvedSkip > 1 {
+            bits.append(skipLabel(resolvedSkip).lowercased())
         }
         bits.append(String(format: "plays %.1fs @ %@", seconds, rate.rawValue))
         return bits

@@ -178,11 +178,12 @@ public struct BurstShot: Codable, Sendable, Identifiable {
     /// non-destructive and re-adjustable.
     public var trimIn: Int
     public var trimOut: Int
-    /// Use every Nth still (1 = all). Orthogonal to the timing mode, so
-    /// skip composes with as-shot speeds and fixed frames-per-still.
-    public var frameSkip: Int
+    /// Use every Nth still. Orthogonal to the timing mode, so skip
+    /// composes with as-shot speeds and fixed frames-per-still. nil = the
+    /// project-wide default applies (mirrors `timingOverride`).
+    public var frameSkipOverride: Int?
 
-    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = [], useJpegSource: Bool = false, includeInExport: Bool = true, trimIn: Int = 0, trimOut: Int = 0, frameSkip: Int = 1) {
+    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = [], useJpegSource: Bool = false, includeInExport: Bool = true, trimIn: Int = 0, trimOut: Int = 0, frameSkipOverride: Int? = nil) {
         self.id = id
         self.name = name
         self.frames = frames
@@ -193,10 +194,13 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         self.includeInExport = includeInExport
         self.trimIn = trimIn
         self.trimOut = trimOut
-        self.frameSkip = max(1, frameSkip)
+        self.frameSkipOverride = frameSkipOverride.map { max(1, $0) }
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, frames, timingOverride, grade, speedRamp, useJpegSource, includeInExport, trimIn, trimOut, frameSkip }
+    private enum CodingKeys: String, CodingKey {
+        case id, name, frames, timingOverride, grade, speedRamp, useJpegSource, includeInExport, trimIn, trimOut
+        case frameSkipOverride = "frameSkip"
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -210,12 +214,12 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         includeInExport = try c.decodeIfPresent(Bool.self, forKey: .includeInExport) ?? true
         trimIn = try c.decodeIfPresent(Int.self, forKey: .trimIn) ?? 0
         trimOut = try c.decodeIfPresent(Int.self, forKey: .trimOut) ?? 0
-        frameSkip = max(1, try c.decodeIfPresent(Int.self, forKey: .frameSkip) ?? 1)
+        frameSkipOverride = (try c.decodeIfPresent(Int.self, forKey: .frameSkipOverride)).flatMap { $0 > 1 ? $0 : nil }
         // Migrate the retired frame-skip timing mode into the orthogonal
         // setting, keeping the old hold length as the fixed timing.
         if case .frameSkip(let every, let held)? = timingOverride {
             timingOverride = .fixedFramesPerStill(frames: held)
-            frameSkip = max(1, every)
+            frameSkipOverride = max(1, every)
         }
     }
 
@@ -227,11 +231,18 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         return Array(frames[lo..<min(hi, frames.count)])
     }
 
+    /// Resolved skip: the per-shot override, else the project default.
+    public func frameSkip(projectDefault: Int) -> Int {
+        max(1, frameSkipOverride ?? projectDefault)
+    }
+
     /// Trims, then frame skip: what playback, stats, and export consume.
-    public var playbackFrames: [StillFrame] {
+    /// Pass the project default so un-overridden shots follow it.
+    public func playbackFrames(skipDefault: Int = 1) -> [StillFrame] {
         let trimmed = effectiveFrames
-        guard frameSkip > 1 else { return trimmed }
-        return stride(from: 0, to: trimmed.count, by: frameSkip).map { trimmed[$0] }
+        let skip = frameSkip(projectDefault: skipDefault)
+        guard skip > 1 else { return trimmed }
+        return stride(from: 0, to: trimmed.count, by: skip).map { trimmed[$0] }
     }
 
     public var isTrimmed: Bool { trimIn > 0 || trimOut > 0 }
@@ -299,26 +310,32 @@ public struct BurstDefaults: Codable, Sendable, Hashable {
     /// burst; smaller groups are singles (one-offs), kept aside for
     /// pruning rather than becoming shots.
     public var minBurstCount: Int
+    /// Project-wide frame skip (every Nth still, 1 = all); shots override
+    /// via `frameSkipOverride`.
+    public var frameSkip: Int
 
     public static let `default` = BurstDefaults(gapThreshold: 2.0, timing: .default, minBurstCount: 3)
 
-    public init(gapThreshold: TimeInterval, timing: ShotTimingMode, minBurstCount: Int = 3) {
+    public init(gapThreshold: TimeInterval, timing: ShotTimingMode, minBurstCount: Int = 3, frameSkip: Int = 1) {
         self.gapThreshold = gapThreshold
         self.timing = timing
         self.minBurstCount = minBurstCount
+        self.frameSkip = max(1, frameSkip)
     }
 
-    private enum CodingKeys: String, CodingKey { case gapThreshold, timing, minBurstCount }
+    private enum CodingKeys: String, CodingKey { case gapThreshold, timing, minBurstCount, frameSkip }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         gapThreshold = try c.decode(TimeInterval.self, forKey: .gapThreshold)
         timing = try c.decode(ShotTimingMode.self, forKey: .timing)
         minBurstCount = try c.decodeIfPresent(Int.self, forKey: .minBurstCount) ?? 3
-        // Frame skip left the timing modes (it is per-shot now); an old
-        // project default degrades to its hold length.
-        if case .frameSkip(_, let held) = timing {
+        frameSkip = max(1, try c.decodeIfPresent(Int.self, forKey: .frameSkip) ?? 1)
+        // Frame skip left the timing modes; an old frame-skip default
+        // becomes its hold length as timing plus the skip itself.
+        if case .frameSkip(let every, let held) = timing {
             timing = .fixedFramesPerStill(frames: held)
+            frameSkip = max(1, every)
         }
     }
 }
@@ -479,9 +496,9 @@ public enum ShotTimingEngine {
 
     /// Full schedule for a shot: head/tail trim, frame skip, timing mode,
     /// then the speed ramp. Event `frameIndex` values index
-    /// `shot.playbackFrames`.
-    public static func schedule(for shot: BurstShot, projectDefault: ShotTimingMode, rate: FrameRate) -> [StillEvent] {
-        let base = schedule(frames: shot.playbackFrames, mode: shot.timing(projectDefault: projectDefault), rate: rate)
+    /// `shot.playbackFrames(skipDefault:)`.
+    public static func schedule(for shot: BurstShot, projectDefault: ShotTimingMode, skipDefault: Int = 1, rate: FrameRate) -> [StillEvent] {
+        let base = schedule(frames: shot.playbackFrames(skipDefault: skipDefault), mode: shot.timing(projectDefault: projectDefault), rate: rate)
         return applyRamp(base, ramp: shot.speedRamp)
     }
 

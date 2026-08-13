@@ -34,10 +34,10 @@ public final class ShotFrameSource: VideoFrameSource, @unchecked Sendable {
     private var bufferPool: CVPixelBufferPool?
     private var poolSize: (w: Int, h: Int) = (0, 0)
 
-    public init(shot: BurstShot, defaultTiming: ShotTimingMode, rate: FrameRate, maxPixel: Int) {
+    public init(shot: BurstShot, defaultTiming: ShotTimingMode, rate: FrameRate, maxPixel: Int, skipDefault: Int = 1) {
         self.shot = shot
-        self.frames = shot.playbackFrames
-        self.schedule = ShotTimingEngine.schedule(for: shot, projectDefault: defaultTiming, rate: rate)
+        self.frames = shot.playbackFrames(skipDefault: skipDefault)
+        self.schedule = ShotTimingEngine.schedule(for: shot, projectDefault: defaultTiming, skipDefault: skipDefault, rate: rate)
         self.totalFrames = ShotTimingEngine.totalFrames(schedule)
         self.nominalFrameRate = rate.fps
         self.durationSeconds = Double(totalFrames) / rate.fps

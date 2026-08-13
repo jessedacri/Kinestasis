@@ -344,6 +344,7 @@ public struct RealtimeProgramHostView: NSViewRepresentable {
                     outputWidth: spec.width,
                     outputHeight: spec.height,
                     burstTiming: workspace.project.settings.burst.timing,
+                    burstSkip: workspace.project.settings.burst.frameSkip,
                     stillPreviewLongEdge: 2048
                 )
                 compositorSpec = spec
