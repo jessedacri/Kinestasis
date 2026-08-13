@@ -14,6 +14,9 @@ struct ShotExportSheet: View {
     @State private var resolutionChoice: ResolutionChoice = .native
     @State private var writeSidecar = false
     @State private var bitrateMbps: Int = 50
+    /// Existing files the export would clobber; non-nil swaps the sheet to
+    /// the conflict question.
+    @State private var conflicts: [String]?
 
     private enum ResolutionChoice: String, CaseIterable {
         case native = "Native"
@@ -37,6 +40,21 @@ struct ShotExportSheet: View {
     }
 
     var body: some View {
+        Group {
+            if let conflicts {
+                conflictView(conflicts)
+            } else {
+                form
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+        .background(KineTheme.bgPanel)
+        .preferredColorScheme(.dark)
+        .onAppear(perform: restoreLastUsed)
+    }
+
+    private var form: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(shots.count == 1 ? "Export Shot" : "Export \(shots.count) Shots")
                 .font(.system(size: 15, weight: .semibold))
@@ -144,10 +162,47 @@ struct ShotExportSheet: View {
                     .disabled(destination == nil || shots.isEmpty)
             }
         }
-        .padding(20)
-        .frame(width: 560)
-        .background(KineTheme.bgPanel)
-        .preferredColorScheme(.dark)
+    }
+
+    // MARK: - Overwrite question
+
+    private func conflictView(_ names: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(names.count == 1 ? "A clip with this name already exists"
+                                  : "\(names.count) clips with these names already exist")
+                .font(.system(size: 15, weight: .semibold))
+            Text("In \(destination?.lastPathComponent ?? "the destination folder"):")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(names.prefix(6), id: \.self) { name in
+                    Text(name)
+                        .font(KineTheme.monoSmall)
+                        .foregroundStyle(KineTheme.textMuted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if names.count > 6 {
+                    Text("and \(names.count - 6) more")
+                        .font(KineTheme.monoSmall)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.vertical, 2)
+            Text("Keep Both writes the new clips with a number added, so nothing is replaced.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Divider().padding(.vertical, 6)
+            HStack {
+                Button("Back") { conflicts = nil }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Replace Existing") { start(policy: .overwrite) }
+                Button("Keep Both") { start(policy: .keepBoth) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
     }
 
     @ViewBuilder
@@ -217,11 +272,66 @@ struct ShotExportSheet: View {
 
     private func runExport() {
         guard let destination else { return }
+        let existing = shots
+            .map { BurstShotExporter.outputURL(for: $0, codec: codec, in: destination) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        if existing.isEmpty {
+            start(policy: .overwrite)
+        } else {
+            conflicts = existing.map(\.lastPathComponent)
+        }
+    }
+
+    private func start(policy: WorkspaceModel.ExportConflictPolicy) {
+        guard let destination else { return }
+        saveLastUsed()
         workspace.showingShotExportSheet = false
         workspace.exportShots(workspace.shotExportTarget, codec: codec, to: destination,
                               longEdge: resolutionChoice.longEdge,
                               bitrateMbps: codec.usesBitrate ? bitrateMbps : nil,
-                              writeSidecar: writeSidecar)
+                              writeSidecar: writeSidecar,
+                              conflicts: policy)
+    }
+
+    // MARK: - Last-used settings
+
+    private enum LastUsed {
+        static let codec = "shotExport.codec"
+        static let resolution = "shotExport.resolution"
+        static let bitrate = "shotExport.bitrateMbps"
+        static let sidecar = "shotExport.writeSidecar"
+        static let destination = "shotExport.destinationPath"
+    }
+
+    private func restoreLastUsed() {
+        let d = UserDefaults.standard
+        if let raw = d.string(forKey: LastUsed.codec),
+           let saved = BurstShotExporter.Codec(rawValue: raw) {
+            codec = saved
+        }
+        if let raw = d.string(forKey: LastUsed.resolution),
+           let saved = ResolutionChoice(rawValue: raw) {
+            resolutionChoice = saved
+        }
+        let savedBitrate = d.integer(forKey: LastUsed.bitrate)
+        bitrateMbps = savedBitrate > 0 ? savedBitrate
+            : (codec.usesBitrate ? codec.defaultBitrateMbps : bitrateMbps)
+        writeSidecar = d.bool(forKey: LastUsed.sidecar)
+        if destination == nil, let path = d.string(forKey: LastUsed.destination) {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                destination = URL(fileURLWithPath: path, isDirectory: true)
+            }
+        }
+    }
+
+    private func saveLastUsed() {
+        let d = UserDefaults.standard
+        d.set(codec.rawValue, forKey: LastUsed.codec)
+        d.set(resolutionChoice.rawValue, forKey: LastUsed.resolution)
+        d.set(bitrateMbps, forKey: LastUsed.bitrate)
+        d.set(writeSidecar, forKey: LastUsed.sidecar)
+        d.set(destination?.path(percentEncoded: false), forKey: LastUsed.destination)
     }
 }
 
