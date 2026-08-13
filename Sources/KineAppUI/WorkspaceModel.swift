@@ -3970,23 +3970,32 @@ public final class WorkspaceModel: ObservableObject {
     /// LRU of ~448px decoded frames keyed by source URL. Base (ungraded)
     /// images — grades ride on top via `ShotGradeRenderer.gradePreview`,
     /// which is what keeps slider changes live without re-decoding.
-    private var shotFrameCache: [URL: CGImage] = [:]
+    private var shotFrameCache: [URL: (image: CGImage, epoch: Int)] = [:]
     private var shotFrameOrder: [URL] = []
     private var shotFramesInFlight: Set<URL> = []
-    /// Eviction is by memory, not count: High-tier frames are ~5x Draft.
-    private static let shotFrameByteBudget = 700 * 1024 * 1024
+    /// Frames decoded before a quality switch keep serving (stale epoch)
+    /// and re-decode lazily, so changing tiers never blanks or blocks.
+    private var cacheEpoch = 0
+    /// Eviction is by memory, not count; High gets a bigger budget since
+    /// its frames are ~16x Draft.
+    private var shotFrameByteBudget: Int {
+        previewQuality == .high ? 1_400_000_000 : 700_000_000
+    }
     private var shotFrameBytes = 0
     private var shotFramePixels: Int { previewQuality.maxPixel }
 
-    /// Skim/playback decode size. Draft is the old 448 behavior; High is
-    /// still an embedded-preview decode, so playback stays realtime.
+    /// Skim/playback decode size in DEVICE pixels (a retina point is two
+    /// of them, which is why the old 448/720/1080 point-ish sizes read
+    /// blurry on any HiDPI screen). All tiers decode from the embedded
+    /// camera preview, so playback stays realtime; High is the full
+    /// embedded preview on most bodies (X-Pro2 1920, Sony 1616).
     public enum PreviewQuality: String, CaseIterable, Sendable {
         case draft, balanced, high
         public var maxPixel: Int {
             switch self {
             case .draft: return 448
-            case .balanced: return 720
-            case .high: return 1080
+            case .balanced: return 960
+            case .high: return 1920
             }
         }
         public var label: String {
@@ -4007,10 +4016,11 @@ public final class WorkspaceModel: ObservableObject {
         guard quality != previewQuality else { return }
         previewQuality = quality
         UserDefaults.standard.set(quality.rawValue, forKey: "previewQuality")
-        shotFrameCache = [:]
-        shotFrameOrder = []
-        shotFrameBytes = 0
-        refinedFrame = nil
+        // Progressive: existing frames keep showing at the old size and
+        // sharpen as the new decodes land - no wipe, no stall.
+        cacheEpoch += 1
+        previewPending = []
+        previewPendingSet = []
         previewVersion += 1
         if let shot = previewShot { prefetchPreviewFrames(for: shot) }
     }
@@ -4038,7 +4048,7 @@ public final class WorkspaceModel: ObservableObject {
                   let url = self.currentShotFrameURL(),
                   self.refinedFrame?.url != url else { return }
             let pixels = Self.refinePixels
-            Task.detached(priority: .utility) {
+            Task.detached(priority: .userInitiated) {
                 guard let image = StillDecoder.decode(url: url, maxPixel: pixels) else { return }
                 await MainActor.run {
                     guard generation == self.refineGeneration else { return }
@@ -4050,7 +4060,7 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     public func cachedPreviewFrame(_ url: URL) -> CGImage? {
-        shotFrameCache[url]
+        shotFrameCache[url]?.image
     }
 
     /// Decode requests wait here; a small worker pool drains it LIFO so
@@ -4066,8 +4076,8 @@ public final class WorkspaceModel: ObservableObject {
     /// Decode a preview frame off-main if it isn't cached; bumps
     /// `previewVersion` when it lands.
     public func requestPreviewFrame(_ url: URL) {
-        guard shotFrameCache[url] == nil,
-              !shotFramesInFlight.contains(url),
+        if let entry = shotFrameCache[url], entry.epoch == cacheEpoch { return }
+        guard !shotFramesInFlight.contains(url),
               !previewPendingSet.contains(url) else { return }
         previewPending.append(url)
         previewPendingSet.insert(url)
@@ -4079,10 +4089,12 @@ public final class WorkspaceModel: ObservableObject {
 
     private func pumpPreviewDecodes() {
         let maxPixel = shotFramePixels
+        let epoch = cacheEpoch
         while previewActiveCount < Self.previewMaxConcurrent, !previewPending.isEmpty {
             let url = previewPending.removeLast()
             previewPendingSet.remove(url)
-            guard shotFrameCache[url] == nil, !shotFramesInFlight.contains(url) else { continue }
+            if let entry = shotFrameCache[url], entry.epoch == epoch { continue }
+            guard !shotFramesInFlight.contains(url) else { continue }
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
             Task.detached(priority: .userInitiated) {
@@ -4099,16 +4111,16 @@ public final class WorkspaceModel: ObservableObject {
 
     private func storePreviewFrame(url: URL, image: CGImage) {
         if let old = shotFrameCache[url] {
-            shotFrameBytes -= old.width * old.height * 4
+            shotFrameBytes -= old.image.width * old.image.height * 4
         } else {
             shotFrameOrder.append(url)
         }
-        shotFrameCache[url] = image
+        shotFrameCache[url] = (image, cacheEpoch)
         shotFrameBytes += image.width * image.height * 4
-        while shotFrameBytes > Self.shotFrameByteBudget, shotFrameOrder.count > 1 {
+        while shotFrameBytes > shotFrameByteBudget, shotFrameOrder.count > 1 {
             let evicted = shotFrameOrder.removeFirst()
-            if let img = shotFrameCache.removeValue(forKey: evicted) {
-                shotFrameBytes -= img.width * img.height * 4
+            if let entry = shotFrameCache.removeValue(forKey: evicted) {
+                shotFrameBytes -= entry.image.width * entry.image.height * 4
             }
         }
         bumpPreviewsCoalesced()
@@ -4143,7 +4155,7 @@ public final class WorkspaceModel: ObservableObject {
             if let jpeg = frame.pairedJpegURL { shotFrameCache[jpeg] = nil }
         }
         shotFrameOrder.removeAll { shotFrameCache[$0] == nil }
-        shotFrameBytes = shotFrameCache.values.reduce(0) { $0 + $1.width * $1.height * 4 }
+        shotFrameBytes = shotFrameCache.values.reduce(0) { $0 + $1.image.width * $1.image.height * 4 }
         refinedFrame = nil
         shotThumbnails[shot.id] = nil
         scheduleShotThumbnails(for: shot)

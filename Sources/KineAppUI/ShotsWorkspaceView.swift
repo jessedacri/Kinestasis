@@ -81,19 +81,6 @@ struct ShotsWorkspaceView: View {
                     .padding(.top, 4)
             }
 
-            BarValueControl(label: "Preview", value: workspace.previewQuality.label.lowercased()) {
-                ForEach(WorkspaceModel.PreviewQuality.allCases, id: \.self) { q in
-                    BarOptionRow(label: "\(q.label) (\(q.maxPixel) px)",
-                                 selected: workspace.previewQuality == q) {
-                        workspace.setPreviewQuality(q)
-                    }
-                }
-                Text("Playback decode size. Paused frames always refine to near-full quality.")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 4)
-            }
-
             BarValueControl(label: "Split gap", value: gapLabel(workspace.project.settings.burst.gapThreshold)) {
                 ForEach([0.5, 1.0, 2.0, 3.0, 5.0, 10.0], id: \.self) { gap in
                     BarOptionRow(label: gapLabel(gap),
@@ -121,6 +108,21 @@ struct ShotsWorkspaceView: View {
             }
 
             Spacer()
+
+            BarValueControl(label: "Preview", value: workspace.previewQuality.label.lowercased()) {
+                ForEach(WorkspaceModel.PreviewQuality.allCases, id: \.self) { q in
+                    BarOptionRow(label: "\(q.label) (\(q.maxPixel) px)",
+                                 selected: workspace.previewQuality == q) {
+                        workspace.setPreviewQuality(q)
+                    }
+                }
+                Text("Playback decode size, not export. Frames sharpen in place after a change; paused frames always refine to near-full quality.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
+
+            Divider().frame(height: 16)
 
             if workspace.importing {
                 if let p = workspace.importProgress, p.total > 0 {

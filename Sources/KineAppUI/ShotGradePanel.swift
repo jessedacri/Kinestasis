@@ -110,24 +110,12 @@ struct ShotGradePanel: View {
                         workspace.setShotTiming(picked, for: shot.id)
                     }
                 } label: {
-                    Label(timingModeLabel(mode) + (shot.timingOverride == nil ? "  (project default)" : ""),
+                    Label(timingModeLabel(mode) + (shot.timingOverride == nil ? " (default)" : ""),
                           systemImage: "timer")
                         .font(.system(size: 11))
+                        .lineLimit(1)
                 }
-                .fixedSize()
-                Menu {
-                    FrameSkipPicker(current: shot.frameSkipOverride, allowDefault: true,
-                                    projectDefault: workspace.project.settings.burst.frameSkip) {
-                        workspace.setShotFrameSkip($0, for: shot.id)
-                    }
-                } label: {
-                    Label(skipLabel(workspace.resolvedFrameSkip(for: shot))
-                              + (shot.frameSkipOverride == nil ? "  (project default)" : ""),
-                          systemImage: "square.3.layers.3d.middle.filled")
-                        .font(.system(size: 11))
-                }
-                .fixedSize()
-                Spacer()
+                Spacer(minLength: 8)
                 Toggle(isOn: Binding(
                     get: { shot.includeInExport },
                     set: { workspace.setIncludeInExport($0, for: shot.id) }
@@ -135,6 +123,21 @@ struct ShotGradePanel: View {
                     Text("Export").font(.system(size: 10))
                 }
                 .toggleStyle(.checkbox)
+            }
+            HStack {
+                Menu {
+                    FrameSkipPicker(current: shot.frameSkipOverride, allowDefault: true,
+                                    projectDefault: workspace.project.settings.burst.frameSkip) {
+                        workspace.setShotFrameSkip($0, for: shot.id)
+                    }
+                } label: {
+                    Label(skipLabel(workspace.resolvedFrameSkip(for: shot))
+                              + (shot.frameSkipOverride == nil ? " (default)" : ""),
+                          systemImage: "square.3.layers.3d.middle.filled")
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
             }
             Text(metadataBits(shot, seconds: seconds, rate: rate).joined(separator: " · "))
                 .font(KineTheme.monoSmall)
@@ -378,6 +381,9 @@ struct ShotGradePanel: View {
                 }
                 .fixedSize()
                 .help("Stills that race back out of the hold")
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 8) {
                 Menu {
                     Button("Gentle") { holdEase = 0.15 }
                     Button("Medium") { holdEase = 0.5 }
@@ -395,7 +401,7 @@ struct ShotGradePanel: View {
                 }
                 .fixedSize()
                 .help("Drop this many stills when the hold releases, as if the cadence kept running underneath")
-                Spacer()
+                Spacer(minLength: 0)
                 Button("Hold on This Still") {
                     workspace.holdRampOnCurrentStill(
                         holdFrames: holdFrames, easeIn: holdEaseIn, easeOut: holdEaseOut,
