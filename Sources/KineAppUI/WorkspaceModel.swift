@@ -4010,7 +4010,7 @@ public final class WorkspaceModel: ObservableObject {
     /// Eviction is by memory, not count; High gets a bigger budget since
     /// its frames are ~16x Draft.
     private var shotFrameByteBudget: Int {
-        previewQuality == .high ? 2_500_000_000 : 700_000_000
+        previewQuality == .high ? 3_200_000_000 : 700_000_000
     }
     private var shotFrameBytes = 0
     private var shotFramePixels: Int { previewQuality.maxPixel }
@@ -4242,10 +4242,26 @@ public final class WorkspaceModel: ObservableObject {
         }
         shotFrameCache[url] = (image, cacheEpoch)
         shotFrameBytes += image.width * image.height * 4
-        while shotFrameBytes > shotFrameByteBudget, shotFrameOrder.count > 1 {
-            let evicted = shotFrameOrder.removeFirst()
-            if let entry = shotFrameCache.removeValue(forKey: evicted) {
-                shotFrameBytes -= entry.image.width * entry.image.height * 4
+        if shotFrameBytes > shotFrameByteBudget {
+            // Never evict the shot being previewed: a looping burst that
+            // evicts its own head re-decodes every frame every pass and
+            // playback thrashes between interim and full quality.
+            let pinned: Set<URL> = previewShot.map { shot in
+                Set(shot.playbackFrames(skipDefault: project.settings.burst.frameSkip)
+                    .map { shot.sourceURL(for: $0) })
+            } ?? []
+            var index = 0
+            while shotFrameBytes > shotFrameByteBudget, index < shotFrameOrder.count,
+                  shotFrameOrder.count > 1 {
+                let candidate = shotFrameOrder[index]
+                if pinned.contains(candidate) {
+                    index += 1
+                    continue
+                }
+                shotFrameOrder.remove(at: index)
+                if let entry = shotFrameCache.removeValue(forKey: candidate) {
+                    shotFrameBytes -= entry.image.width * entry.image.height * 4
+                }
             }
         }
         bumpPreviewsCoalesced()

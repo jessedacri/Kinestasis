@@ -212,7 +212,28 @@ public struct KineRootView: View {
         .sheet(isPresented: $showingAbout) {
             AboutView { showingAbout = false }
         }
-        .onAppear { installKeyMonitor() }
+        .onAppear {
+            installKeyMonitor()
+            // Test rig: `Kinestasis --import <folder>` reproduces the
+            // drag-a-folder flow headlessly for lag hunting; add
+            // `--develop` to jump to Develop on the biggest burst and
+            // play, once the import lands.
+            if let flag = CommandLine.arguments.firstIndex(of: "--import"),
+               CommandLine.arguments.indices.contains(flag + 1) {
+                workspace.ingest(urls: [URL(fileURLWithPath: CommandLine.arguments[flag + 1])])
+                if CommandLine.arguments.contains("--develop") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+                        if let biggest = workspace.orderedShots.max(by: { $0.frames.count < $1.frames.count }) {
+                            workspace.selectShot(biggest.id)
+                            workspace.shotsViewMode = .develop
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                workspace.toggleShotPlayback()
+                            }
+                        }
+                    }
+                }
+            }
+        }
         .onDisappear { removeKeyMonitor() }
     }
 
