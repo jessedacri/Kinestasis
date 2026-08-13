@@ -25,6 +25,9 @@ public extension Notification.Name {
 public struct KineRootView: View {
     @StateObject private var workspace = WorkspaceModel()
     @State private var keyMonitor: Any?
+    /// Currently-held transport keys, for chords: I+O clears the trim,
+    /// K+L steps a frame forward, J+K steps a frame back.
+    @State private var heldChordKeys = HeldChordKeys()
     @State private var showingAbout = false
 
     public init() {}
@@ -208,7 +211,13 @@ public struct KineRootView: View {
     }
 
     private func installKeyMonitor() {
-        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        let held = heldChordKeys
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            if event.type == .keyUp {
+                if let chars = event.charactersIgnoringModifiers { held.keys.remove(chars.lowercased()) }
+                return event
+            }
+
             // Skip if user is typing in a text field
             if NSApp.keyWindow?.firstResponder is NSText { return event }
 
@@ -216,6 +225,10 @@ public struct KineRootView: View {
             let isShift = event.modifierFlags.contains(.shift)
             let isCommand = event.modifierFlags.contains(.command)
             let isOption = event.modifierFlags.contains(.option)
+
+            if !event.isARepeat, HeldChordKeys.tracked.contains(chars.lowercased()) {
+                held.keys.insert(chars.lowercased())
+            }
 
             // Shots workspace: transport acts on the focused (hovered /
             // selected) shot. Everything else falls through.
@@ -225,13 +238,19 @@ public struct KineRootView: View {
                     workspace.toggleShotPlayback()
                     return nil
                 case "j":
-                    workspace.shotShuttle(direction: -1)
+                    // J+K chord: nudge one frame back.
+                    if held.keys.contains("k") { workspace.shotStepFrames(-1) }
+                    else { workspace.shotShuttle(direction: -1) }
                     return nil
                 case "k":
-                    workspace.shotStop()
+                    if held.keys.contains("l") { workspace.shotStepFrames(1) }
+                    else if held.keys.contains("j") { workspace.shotStepFrames(-1) }
+                    else { workspace.shotStop() }
                     return nil
                 case "l":
-                    workspace.shotShuttle(direction: 1)
+                    // K+L chord: nudge one frame forward.
+                    if held.keys.contains("k") { workspace.shotStepFrames(1) }
+                    else { workspace.shotShuttle(direction: 1) }
                     return nil
                 case String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!)):
                     workspace.shotStepFrames(isShift ? -10 : -1)
@@ -240,10 +259,16 @@ public struct KineRootView: View {
                     workspace.shotStepFrames(isShift ? 10 : 1)
                     return nil
                 case "i":
-                    if isOption { workspace.clearShotTrim() } else { workspace.setShotTrimInAtPlayhead() }
+                    // I+O together (either order) clears the trim.
+                    if isOption || held.keys.contains("o") { workspace.clearShotTrim() }
+                    else { workspace.setShotTrimInAtPlayhead() }
                     return nil
                 case "o":
-                    if isOption { workspace.clearShotTrim() } else { workspace.setShotTrimOutAtPlayhead() }
+                    if isOption || held.keys.contains("i") { workspace.clearShotTrim() }
+                    else { workspace.setShotTrimOutAtPlayhead() }
+                    return nil
+                case "m":
+                    workspace.toggleStillMarkAtPlayhead()
                     return nil
                 default:
                     break
@@ -429,6 +454,11 @@ public struct KineRootView: View {
             }
         }
         keyMonitor = monitor
+    }
+
+    final class HeldChordKeys {
+        static let tracked: Set<String> = ["j", "k", "l", "i", "o"]
+        var keys: Set<String> = []
     }
 
     private func removeKeyMonitor() {

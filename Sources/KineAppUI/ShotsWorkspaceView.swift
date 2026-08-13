@@ -421,6 +421,7 @@ private struct ShotCard: View {
                     let _ = workspace.previewVersion
                     stripOrSkimFrame
                     trimShade(width: geo.size.width)
+                    markTicks(width: geo.size.width)
                     playheadLine(width: geo.size.width)
                     badges
                     includeToggle
@@ -522,6 +523,21 @@ private struct ShotCard: View {
                 .overlay(ProgressView().controlSize(.small))
         } else {
             ShotFilmstrip(images: images, aspect: aspect)
+        }
+    }
+
+    /// Amber stars over stills marked (M) as delivery selects.
+    @ViewBuilder private func markTicks(width: CGFloat) -> some View {
+        if !shot.markedStillIDs.isEmpty, !shot.frames.isEmpty {
+            let n = CGFloat(shot.frames.count)
+            ForEach(Array(shot.frames.enumerated()).filter { shot.markedStillIDs.contains($0.element.id) },
+                    id: \.element.id) { idx, _ in
+                Image(systemName: "star.fill")
+                    .font(.system(size: 7))
+                    .foregroundStyle(KineTheme.accent)
+                    .shadow(color: .black.opacity(0.8), radius: 1)
+                    .offset(x: (CGFloat(idx) + 0.5) / n * width - 4, y: 3)
+            }
         }
     }
 

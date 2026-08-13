@@ -14,6 +14,9 @@ struct ShotExportSheet: View {
     @State private var resolutionChoice: ResolutionChoice = .native
     @State private var writeSidecar = false
     @State private var bitrateMbps: Int = 50
+    @State private var exportStills = true
+    @State private var stillsIncludeOriginals = false
+    @State private var stillsIncludeRaw = false
     /// Existing files the export would clobber; non-nil swaps the sheet to
     /// the conflict question.
     @State private var conflicts: [String]?
@@ -33,6 +36,8 @@ struct ShotExportSheet: View {
     }
 
     private var shots: [BurstShot] { workspace.shotsForExportTarget }
+
+    private var markedStillsCount: Int { shots.reduce(0) { $0 + $1.markedStillIDs.count } }
 
     private var nativeSummary: String {
         guard let size = shots.first?.effectiveFrames.first?.pixelSize else { return "source size" }
@@ -140,6 +145,39 @@ struct ShotExportSheet: View {
                 Text(sizeEstimate)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+            }
+
+            row("Stills") {
+                VStack(alignment: .leading, spacing: 5) {
+                    if markedStillsCount == 0 {
+                        Text("No stills marked. Press M on a still in the player to mark it for delivery.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Toggle(isOn: $exportStills) {
+                            Text("Export stills selections (\(markedStillsCount) marked, into a Stills folder)")
+                                .font(.system(size: 11))
+                        }
+                        .toggleStyle(.checkbox)
+                        if exportStills {
+                            Toggle(isOn: $stillsIncludeOriginals) {
+                                Text("Include unmodified originals")
+                                    .font(.system(size: 11))
+                            }
+                            .toggleStyle(.checkbox)
+                            .padding(.leading, 18)
+                            Toggle(isOn: $stillsIncludeRaw) {
+                                Text("Include RAW files when present")
+                                    .font(.system(size: 11))
+                            }
+                            .toggleStyle(.checkbox)
+                            .padding(.leading, 18)
+                            Text("Marked stills export as graded full-resolution JPEGs.")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
             }
 
             row("Handoff") {
@@ -290,6 +328,10 @@ struct ShotExportSheet: View {
                               longEdge: resolutionChoice.longEdge,
                               bitrateMbps: codec.usesBitrate ? bitrateMbps : nil,
                               writeSidecar: writeSidecar,
+                              stills: exportStills && markedStillsCount > 0
+                                  ? StillExporter.Options(includeOriginals: stillsIncludeOriginals,
+                                                          includeRaw: stillsIncludeRaw)
+                                  : nil,
                               conflicts: policy)
     }
 
@@ -301,6 +343,9 @@ struct ShotExportSheet: View {
         static let bitrate = "shotExport.bitrateMbps"
         static let sidecar = "shotExport.writeSidecar"
         static let destination = "shotExport.destinationPath"
+        static let stills = "shotExport.exportStills"
+        static let stillsOriginals = "shotExport.stillsIncludeOriginals"
+        static let stillsRaw = "shotExport.stillsIncludeRaw"
     }
 
     private func restoreLastUsed() {
@@ -317,6 +362,9 @@ struct ShotExportSheet: View {
         bitrateMbps = savedBitrate > 0 ? savedBitrate
             : (codec.usesBitrate ? codec.defaultBitrateMbps : bitrateMbps)
         writeSidecar = d.bool(forKey: LastUsed.sidecar)
+        if d.object(forKey: LastUsed.stills) != nil { exportStills = d.bool(forKey: LastUsed.stills) }
+        stillsIncludeOriginals = d.bool(forKey: LastUsed.stillsOriginals)
+        stillsIncludeRaw = d.bool(forKey: LastUsed.stillsRaw)
         if destination == nil, let path = d.string(forKey: LastUsed.destination) {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
@@ -331,6 +379,9 @@ struct ShotExportSheet: View {
         d.set(resolutionChoice.rawValue, forKey: LastUsed.resolution)
         d.set(bitrateMbps, forKey: LastUsed.bitrate)
         d.set(writeSidecar, forKey: LastUsed.sidecar)
+        d.set(exportStills, forKey: LastUsed.stills)
+        d.set(stillsIncludeOriginals, forKey: LastUsed.stillsOriginals)
+        d.set(stillsIncludeRaw, forKey: LastUsed.stillsRaw)
         d.set(destination?.path(percentEncoded: false), forKey: LastUsed.destination)
     }
 }

@@ -14,6 +14,10 @@ struct ShotGradePanel: View {
     @State private var renderGeneration = 0
     @State private var exifFields: [ExifReader.Field] = []
     @State private var exifURL: URL?
+    @State private var holdSeconds = 1.0
+    @State private var holdEaseShots = 3
+    @State private var holdEase = 0.5
+    @State private var recordFreeform = false
 
     private let renderer = ShotGradeRenderer()
 
@@ -91,6 +95,26 @@ struct ShotGradePanel: View {
                 } else {
                     ProgressView().controlSize(.small)
                 }
+                if workspace.rampRecordingShotID != nil {
+                    ScrollScrubRecorder { delta in
+                        if workspace.rampRecordingScrub(deltaStills: delta) {
+                            NSHapticFeedbackManager.defaultPerformer
+                                .perform(.alignment, performanceTime: .now)
+                        }
+                    }
+                    VStack {
+                        Text("RECORDING RAMP · scroll sideways to scrub, ticks per still")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(KineTheme.accent.opacity(0.92))
+                            .foregroundStyle(.black)
+                            .clipShape(Capsule())
+                            .padding(8)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
+                }
                 if workspace.shotPlayRate != 0 {
                     VStack {
                         HStack {
@@ -164,6 +188,25 @@ struct ShotGradePanel: View {
                     }
                     .buttonStyle(.plain)
                     .help("Clear trim")
+                }
+
+                if let current = workspace.currentShotFrame() {
+                    let marked = current.shot.markedStillIDs.contains(current.frame.id)
+                    Divider().frame(height: 12)
+                    Button {
+                        workspace.toggleStillMark(current.frame.id, in: current.shot.id)
+                    } label: {
+                        Image(systemName: marked ? "star.fill" : "star")
+                            .font(.system(size: 10))
+                            .foregroundStyle(marked ? KineTheme.accent : KineTheme.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Mark this still for export (key: M)")
+                    if current.shot.markedStillIDs.count > 0 {
+                        Text("\(current.shot.markedStillIDs.count)")
+                            .font(KineTheme.monoSmall)
+                            .foregroundStyle(KineTheme.textMuted)
+                    }
                 }
             }
             .padding(.horizontal, 10)
@@ -494,7 +537,65 @@ struct ShotGradePanel: View {
             Text("Steep = fast, flat = linger. Duration stays the same.")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
+
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach([0.5, 1.0, 1.5, 2.0, 3.0], id: \.self) { s in
+                        Button(String(format: "%.1fs", s)) { holdSeconds = s }
+                    }
+                } label: {
+                    Text(String(format: "Hold %.1fs", holdSeconds)).font(.system(size: 10))
+                }
+                .fixedSize()
+                Menu {
+                    ForEach([0, 1, 2, 3, 5, 8], id: \.self) { n in
+                        Button("\(n) shot\(n == 1 ? "" : "s")") { holdEaseShots = n }
+                    }
+                } label: {
+                    Text("Ease over \(holdEaseShots)").font(.system(size: 10))
+                }
+                .fixedSize()
+                Menu {
+                    Button("Gentle") { holdEase = 0.15 }
+                    Button("Medium") { holdEase = 0.5 }
+                    Button("Sharp") { holdEase = 1.0 }
+                } label: {
+                    Text(easeLabel).font(.system(size: 10))
+                }
+                .fixedSize()
+                Spacer()
+                Button("Hold on This Still") {
+                    workspace.holdRampOnCurrentStill(
+                        holdSeconds: holdSeconds, easeShots: holdEaseShots, ease: holdEase)
+                }
+                .font(.system(size: 10, weight: .semibold))
+                .help("Linger on the still under the playhead; the rest of the shot speeds up around it")
+            }
+
+            HStack(spacing: 8) {
+                if workspace.rampRecordingShotID != nil {
+                    Button("Stop and Apply") { workspace.endRampRecording(apply: true) }
+                        .font(.system(size: 10, weight: .semibold))
+                    Button("Cancel") { workspace.endRampRecording(apply: false) }
+                        .font(.system(size: 10))
+                    Spacer()
+                } else {
+                    Button("Record Ramp") { workspace.beginRampRecording(freeform: recordFreeform) }
+                        .font(.system(size: 10, weight: .semibold))
+                        .help("Scroll sideways over the player to scrub the burst; your pace becomes the ramp")
+                    Toggle(isOn: $recordFreeform) {
+                        Text("Freeform speed").font(.system(size: 10))
+                    }
+                    .toggleStyle(.checkbox)
+                    .help("Off: scrubbing tops out at the project frame rate. On: no cap.")
+                    Spacer()
+                }
+            }
         }
+    }
+
+    private var easeLabel: String {
+        holdEase < 0.3 ? "Gentle" : holdEase < 0.8 ? "Medium" : "Sharp"
     }
 
     // MARK: - Looks + copy/paste
@@ -603,5 +704,31 @@ private struct PlayerScrubBar: View {
             )
         }
         .frame(height: 14)
+    }
+}
+
+/// Catches horizontal trackpad scrolling over the player while a ramp
+/// recording is live; ~14 points of scroll per still feels like dragging
+/// real film. Forward-only: the model clamps negative motion.
+struct ScrollScrubRecorder: NSViewRepresentable {
+    let onScrub: (Double) -> Void
+
+    func makeNSView(context: Context) -> ScrubView {
+        let view = ScrubView()
+        view.onScrub = onScrub
+        return view
+    }
+
+    func updateNSView(_ view: ScrubView, context: Context) {
+        view.onScrub = onScrub
+    }
+
+    final class ScrubView: NSView {
+        var onScrub: ((Double) -> Void)?
+        override func scrollWheel(with event: NSEvent) {
+            // Natural scrolling: swiping the content leftward moves
+            // forward through the burst, like pulling film past a gate.
+            onScrub?(Double(-event.scrollingDeltaX) / 14.0)
+        }
     }
 }

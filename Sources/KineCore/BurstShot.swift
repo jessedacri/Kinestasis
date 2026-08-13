@@ -182,8 +182,11 @@ public struct BurstShot: Codable, Sendable, Identifiable {
     /// composes with as-shot speeds and fixed frames-per-still. nil = the
     /// project-wide default applies (mirrors `timingOverride`).
     public var frameSkipOverride: Int?
+    /// Stills the user marked (M) for delivery alongside the movies —
+    /// the on-set selects that would otherwise need a Lightroom pass.
+    public var markedStillIDs: Set<UUID>
 
-    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = [], useJpegSource: Bool = false, includeInExport: Bool = true, trimIn: Int = 0, trimOut: Int = 0, frameSkipOverride: Int? = nil) {
+    public init(id: ShotID = ShotID(), name: String, frames: [StillFrame], timingOverride: ShotTimingMode? = nil, grade: ShotGrade = .identity, speedRamp: [CurvePoint] = [], useJpegSource: Bool = false, includeInExport: Bool = true, trimIn: Int = 0, trimOut: Int = 0, frameSkipOverride: Int? = nil, markedStillIDs: Set<UUID> = []) {
         self.id = id
         self.name = name
         self.frames = frames
@@ -195,10 +198,11 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.frameSkipOverride = frameSkipOverride.map { max(1, $0) }
+        self.markedStillIDs = markedStillIDs
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, frames, timingOverride, grade, speedRamp, useJpegSource, includeInExport, trimIn, trimOut
+        case id, name, frames, timingOverride, grade, speedRamp, useJpegSource, includeInExport, trimIn, trimOut, markedStillIDs
         case frameSkipOverride = "frameSkip"
     }
 
@@ -215,6 +219,7 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         trimIn = try c.decodeIfPresent(Int.self, forKey: .trimIn) ?? 0
         trimOut = try c.decodeIfPresent(Int.self, forKey: .trimOut) ?? 0
         frameSkipOverride = (try c.decodeIfPresent(Int.self, forKey: .frameSkipOverride)).flatMap { $0 > 1 ? $0 : nil }
+        markedStillIDs = try c.decodeIfPresent(Set<UUID>.self, forKey: .markedStillIDs) ?? []
         // Migrate the retired frame-skip timing mode into the orthogonal
         // setting, keeping the old hold length as the fixed timing.
         if case .frameSkip(let every, let held)? = timingOverride {

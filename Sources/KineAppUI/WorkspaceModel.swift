@@ -4155,6 +4155,119 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     /// nil clears the per-shot override back to the project default.
+    // MARK: - Ramp authoring
+
+    /// Hold on the still under the playhead. Duration is preserved by the
+    /// ramp, so the hold is expressed as a share of the clip's length and
+    /// the rest of the shot speeds up around it.
+    public func holdRampOnCurrentStill(holdSeconds: Double, easeShots: Int, ease: Double) {
+        guard let shot = previewShot else { return }
+        let frames = playbackFrames(for: shot)
+        guard frames.count > 1,
+              let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
+        let totalSeconds = Double(ShotTimingEngine.totalFrames(schedule(for: shot))) / shotFrameRate.fps
+        guard totalSeconds > 0 else { return }
+        let ramp = RampBuilder.holdRamp(stillIndex: event.frameIndex, stillCount: frames.count,
+                                        holdShare: holdSeconds / totalSeconds,
+                                        easeShots: easeShots, ease: ease)
+        setShotRamp(ramp, for: shot.id)
+    }
+
+    // MARK: - Ramp recording (trackpad scrub with haptic ticks)
+
+    @Published public var rampRecordingShotID: ShotID?
+    private var rampRecordFreeform = false
+    private var rampRecordPosition: Double = 0
+    private var rampRecordDwells: [Double] = []
+    private var rampRecordCurrentStill = 0
+    private var rampRecordLastTick: TimeInterval = 0
+
+    public func beginRampRecording(freeform: Bool) {
+        guard let shot = previewShot else { return }
+        shotStop()
+        rampRecordFreeform = freeform
+        rampRecordingShotID = shot.id
+        rampRecordDwells = [Double](repeating: 0, count: playbackFrames(for: shot).count)
+        rampRecordPosition = 0
+        rampRecordCurrentStill = 0
+        rampRecordLastTick = ProcessInfo.processInfo.systemUptime
+        shotPlayheadFrame = 0
+        prefetchPreviewFrames(for: shot)
+    }
+
+    /// Advance the recording by a scroll delta (in stills). Forward-only;
+    /// capped to the project frame rate unless freeform. Returns true when
+    /// the visible still changed (the caller's haptic tick).
+    public func rampRecordingScrub(deltaStills: Double) -> Bool {
+        guard let id = rampRecordingShotID, let shot = project.mediaPool.shots[id] else { return false }
+        let count = rampRecordDwells.count
+        guard count > 1 else { return false }
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = max(0.0005, now - rampRecordLastTick)
+        rampRecordDwells[rampRecordCurrentStill] += elapsed
+        rampRecordLastTick = now
+        var advance = max(0, deltaStills)
+        if !rampRecordFreeform {
+            // One still per output frame is the physical ceiling.
+            advance = min(advance, elapsed * shotFrameRate.fps)
+        }
+        rampRecordPosition = min(Double(count - 1), rampRecordPosition + advance)
+        let still = Int(rampRecordPosition)
+        guard still != rampRecordCurrentStill else { return false }
+        rampRecordCurrentStill = still
+        if let ev = schedule(for: shot).first(where: { $0.frameIndex >= still }) {
+            shotPlayheadFrame = ev.startFrame
+        }
+        return true
+    }
+
+    public var rampRecordingReachedEnd: Bool {
+        !rampRecordDwells.isEmpty && rampRecordCurrentStill >= rampRecordDwells.count - 1
+    }
+
+    public func endRampRecording(apply: Bool) {
+        defer { rampRecordingShotID = nil; rampRecordDwells = [] }
+        guard let id = rampRecordingShotID, apply, rampRecordDwells.count > 1 else { return }
+        rampRecordDwells[rampRecordCurrentStill] += ProcessInfo.processInfo.systemUptime - rampRecordLastTick
+        var dwells = rampRecordDwells
+        // Anything not reached plays at a neutral pace (the median dwell
+        // of what was scrubbed) so the curve still lands on the end.
+        let visited = dwells.filter { $0 > 0.001 }.sorted()
+        let neutral = visited.isEmpty ? 0.1 : visited[visited.count / 2]
+        for i in dwells.indices where dwells[i] <= 0.001 { dwells[i] = neutral }
+        setShotRamp(RampBuilder.ramp(fromDwells: dwells), for: id)
+    }
+
+    /// M: toggle the still under the playhead as a delivery select.
+    public func toggleStillMarkAtPlayhead() {
+        guard let shot = previewShot else { return }
+        let frames = playbackFrames(for: shot)
+        guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)),
+              frames.indices.contains(event.frameIndex) else { return }
+        toggleStillMark(frames[event.frameIndex].id, in: shot.id)
+    }
+
+    public func toggleStillMark(_ frameID: UUID, in shotID: ShotID) {
+        guard var shot = project.mediaPool.shots[shotID] else { return }
+        if shot.markedStillIDs.contains(frameID) {
+            shot.markedStillIDs.remove(frameID)
+        } else {
+            shot.markedStillIDs.insert(frameID)
+        }
+        project.mediaPool.shots[shotID] = shot
+        project.modifiedAt = Date()
+        markDirty()
+    }
+
+    /// The still currently on screen in the player, if any.
+    public func currentShotFrame() -> (shot: BurstShot, frame: StillFrame)? {
+        guard let shot = previewShot else { return nil }
+        let frames = playbackFrames(for: shot)
+        guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)),
+              frames.indices.contains(event.frameIndex) else { return nil }
+        return (shot, frames[event.frameIndex])
+    }
+
     public func setShotFrameSkip(_ every: Int?, for id: ShotID) {
         guard var shot = project.mediaPool.shots[id] else { return }
         let override = every.map { max(1, $0) }
@@ -4342,6 +4455,7 @@ public final class WorkspaceModel: ObservableObject {
     public func exportShots(_ ids: [ShotID]?, codec: BurstShotExporter.Codec,
                             to directory: URL, longEdge: Int? = nil, bitrateMbps: Int? = nil,
                             writeSidecar: Bool = false,
+                            stills: StillExporter.Options? = nil,
                             conflicts conflictPolicy: ExportConflictPolicy = .overwrite) {
         let shots = ids.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? exportableShots
         guard !shots.isEmpty, shotExportProgress == nil else { return }
@@ -4391,6 +4505,24 @@ public final class WorkspaceModel: ObservableObject {
                 let fraction = Double(i + 1) / Double(shots.count)
                 await MainActor.run { self.shotExportProgress = fraction }
             }
+            // Marked stills ride along into their own folder: graded
+            // full-res JPEGs, plus originals / RAW when asked.
+            if let stillsOptions = stills, !cancel.isCancelled {
+                let stillsDir = directory.appendingPathComponent("Stills", isDirectory: true)
+                await MainActor.run { self.shotBatchLabel = "Exporting stills selections to Stills…" }
+                for shot in shots where !shot.markedStillIDs.isEmpty {
+                    if cancel.isCancelled { break }
+                    for frame in shot.frames where shot.markedStillIDs.contains(frame.id) {
+                        if cancel.isCancelled { break }
+                        do {
+                            try StillExporter.export(frame: frame, of: shot, to: stillsDir, options: stillsOptions)
+                        } catch {
+                            failures.append("\(shot.name) still: \(error.localizedDescription)")
+                        }
+                    }
+                }
+            }
+
             if writeSidecar && !sidecarEntries.isEmpty && !cancel.isCancelled {
                 do {
                     _ = try ShotBatchXMLSidecar().write(
