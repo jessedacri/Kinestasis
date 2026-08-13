@@ -137,22 +137,7 @@ struct ShotsWorkspaceView: View {
                 }
             }
 
-            if let p = workspace.previewPrimeProgress {
-                ProgressView(value: Double(p.done), total: Double(max(1, p.total)))
-                    .controlSize(.small).frame(width: 110)
-                Text("Generating previews \(p.done.formatted()) / \(p.total.formatted())")
-                    .font(KineTheme.monoSmall)
-                    .foregroundStyle(.secondary)
-                Button {
-                    workspace.cancelPreviewPriming()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Stop generating previews (frames still load on demand)")
-            }
+            PrimeProgressBar(workspace: workspace, progress: workspace.primeProgress)
 
             if let progress = workspace.shotExportProgress {
                 ProgressView(value: progress).controlSize(.small).frame(width: 110)
@@ -242,7 +227,7 @@ struct ShotsWorkspaceView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 320, maximum: 480), spacing: 12)],
                               alignment: .leading, spacing: 12) {
                         ForEach(section.shots) { shot in
-                            ShotCard(workspace: workspace, shot: shot)
+                            ShotCard(workspace: workspace, previews: workspace.previewTicker, shot: shot)
                         }
                     }
                     .padding(.horizontal, 14)
@@ -417,6 +402,7 @@ private struct SinglesSection: View {
 /// and the live stats line. Click to open it in the inspector.
 struct ShotCard: View {
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var previews: WorkspaceModel.PreviewTicker
     let shot: BurstShot
 
     private var isSelected: Bool { workspace.selectedShotID == shot.id }
@@ -452,7 +438,7 @@ struct ShotCard: View {
         VStack(alignment: .leading, spacing: 5) {
             GeometryReader { geo in
                 ZStack(alignment: .topLeading) {
-                    let _ = workspace.previewVersion
+                    let _ = previews.version
                     stripOrSkimFrame
                     trimShade(width: geo.size.width)
                     markTicks(width: geo.size.width)
@@ -785,5 +771,32 @@ struct TimingOptionRows: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
             .padding(.top, 6)
+    }
+}
+
+
+/// The only view observing prime progress, so its ~3 Hz ticks re-render
+/// this row and nothing else.
+private struct PrimeProgressBar: View {
+    let workspace: WorkspaceModel
+    @ObservedObject var progress: WorkspaceModel.PrimeProgress
+
+    var body: some View {
+        if let p = progress.value {
+            ProgressView(value: Double(p.done), total: Double(max(1, p.total)))
+                .controlSize(.small).frame(width: 110)
+            Text("Generating previews \(p.done.formatted()) / \(p.total.formatted())")
+                .font(KineTheme.monoSmall)
+                .foregroundStyle(.secondary)
+            Button {
+                workspace.cancelPreviewPriming()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Stop generating previews (frames still load on demand)")
+        }
     }
 }

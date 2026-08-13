@@ -612,7 +612,7 @@ private struct TimelineWithZoomBar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TimelineHostView(workspace: workspace)
+            TimelineHostView(workspace: workspace, previews: workspace.previewTicker)
             Divider()
             HStack(spacing: 8) {
                 Button(action: { workspace.zoomOut() }) {
@@ -642,6 +642,7 @@ private struct TimelineWithZoomBar: View {
 
 private struct TimelineHostView: NSViewRepresentable {
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var previews: WorkspaceModel.PreviewTicker
     @ObservedObject var settings: KineSettings = .shared
 
     func makeNSView(context: Context) -> KineTimelineView {
@@ -836,7 +837,7 @@ private struct TimelineHostView: NSViewRepresentable {
             }
         }
         view.videoThumbnails = thumbs
-        _ = workspace.previewVersion
+        _ = previews.version
 
         // Audio meters update via SwiftUI's playhead-driven re-renders
         // (playheadTime ticks at 60Hz while playing, which retriggers

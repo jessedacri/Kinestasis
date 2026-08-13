@@ -18,7 +18,9 @@ struct ShotDevelopView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 KeyGlyphBar(glyphs: workspace.keyGlyphs)
                 Divider()
-                shotStrip
+                if !ProcessInfo.processInfo.arguments.contains("--nostrip") {
+                    shotStrip
+                }
             }
             Divider()
             ShotGradePanel(workspace: workspace, showPlayer: false)
@@ -36,7 +38,7 @@ struct ShotDevelopView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 8) {
                         ForEach(workspace.orderedShots) { shot in
-                            ShotCard(workspace: workspace, shot: shot)
+                            ShotCard(workspace: workspace, previews: workspace.previewTicker, shot: shot)
                                 .frame(width: 230)
                                 .id(shot.id)
                         }

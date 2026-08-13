@@ -15,7 +15,8 @@ struct ShotPlayerView: View {
     var body: some View {
         let shot = workspace.previewShot
         VStack(spacing: 0) {
-            PlayerFrameHost(workspace: workspace, transport: workspace.shotTransport)
+            PlayerFrameHost(workspace: workspace, transport: workspace.shotTransport,
+                            previews: workspace.previewTicker)
                 .frame(minHeight: large ? 280 : 160, idealHeight: large ? nil : 240,
                        maxHeight: large ? .infinity : nil)
                 .contentShape(Rectangle())
@@ -139,7 +140,13 @@ struct FrameLayerView: NSViewRepresentable {
         required init?(coder: NSCoder) { nil }
 
         func show(_ image: CGImage?) {
+            // Kill the implicit contents fade: at playback rate the
+            // default 0.25s animation stacks into a continuous animation
+            // stream that drives full-window layout every frame.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             layer?.contents = image
+            CATransaction.commit()
         }
 
         override func viewDidChangeBackingProperties() {
@@ -155,6 +162,7 @@ struct FrameLayerView: NSViewRepresentable {
 private struct PlayerFrameHost: View {
     @ObservedObject var workspace: WorkspaceModel
     @ObservedObject var transport: WorkspaceModel.ShotTransport
+    @ObservedObject var previews: WorkspaceModel.PreviewTicker
 
     @State private var playerImage: CGImage?
     @State private var renderGeneration = 0
@@ -188,7 +196,7 @@ private struct PlayerFrameHost: View {
         .onAppear { rerender() }
         .onReceive(transport.$playheadFrame) { _ in rerender() }
         .onReceive(transport.$playRate) { _ in rerender() }
-        .onChange(of: workspace.previewVersion) { _, _ in rerender() }
+        .onChange(of: previews.version) { _, _ in rerender() }
         .onChange(of: workspace.skimShotID) { _, _ in rerender() }
         .onChange(of: workspace.selectedShotID) { _, _ in rerender() }
         .onChange(of: shot?.grade) { _, _ in rerender() }

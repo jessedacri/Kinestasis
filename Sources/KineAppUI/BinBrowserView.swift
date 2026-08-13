@@ -64,7 +64,7 @@ struct BinBrowserView: View {
             .padding(.top, 8)
             .padding(.bottom, 2)
             ForEach(shots) { shot in
-                BurstShotRow(workspace: workspace, shot: shot)
+                BurstShotRow(workspace: workspace, previews: workspace.previewTicker, shot: shot)
             }
         }
     }
@@ -282,6 +282,7 @@ struct BinBrowserView: View {
 /// stats, and a context menu for the per-clip timing override.
 private struct BurstShotRow: View {
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var previews: WorkspaceModel.PreviewTicker
     let shot: BurstShot
 
     private var mode: ShotTimingMode { shot.timing(projectDefault: workspace.project.settings.burst.timing) }
@@ -368,7 +369,7 @@ private struct BurstShotRow: View {
     @ViewBuilder private var stripContent: some View {
         // previewVersion (via workspace's objectWillChange) refreshes this
         // once the async thumb decode lands.
-        let _ = workspace.previewVersion
+        let _ = previews.version
         let images = workspace.shotThumbnails[shot.id] ?? []
         if images.isEmpty {
             Rectangle().fill(Color.black.opacity(0.35))

@@ -255,10 +255,19 @@ public final class WorkspaceModel: ObservableObject {
     /// Reserves the PPE playback decoder for actual playback.
     public let skimProvider = SkimFrameProvider()
 
-    /// Bumped whenever the preview cache commits new waveform / thumbnail
-    /// data. The SwiftUI timeline host observes this so `updateNSView`
-    /// re-runs and snapshots the latest previews into the NSView.
-    @Published public private(set) var previewVersion: Int = 0
+    /// Bumped whenever the preview cache commits new frames. Its own
+    /// ObservableObject so 7 Hz preview ticks re-render ONLY the views
+    /// that draw preview images - published on the workspace it re-ran
+    /// layout for the entire app (the third instance of the
+    /// ShotTransport footgun, and the priming-time pinwheel).
+    public final class PreviewTicker: ObservableObject {
+        @Published public internal(set) var version = 0
+    }
+    public let previewTicker = PreviewTicker()
+    public internal(set) var previewVersion: Int {
+        get { previewTicker.version }
+        set { previewTicker.version = newValue }
+    }
 
     private let prober = MediaProber()
     private let stillsIngest = StillsIngest()
@@ -466,8 +475,14 @@ public final class WorkspaceModel: ObservableObject {
         autosaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, isDirty else { return }
+                // Encode + write off-main: a 200-shot project is a
+                // multi-MB JSON and saving it on the main thread was a
+                // once-a-minute stall.
+                let snapshot = project
                 let url = ProjectStore.autosaveURL(forProjectID: project.id)
-                try? ProjectStore.save(project: project, to: url)
+                Task.detached(priority: .utility) {
+                    try? ProjectStore.save(project: snapshot, to: url)
+                }
             }
         }
     }
@@ -3966,16 +3981,24 @@ public final class WorkspaceModel: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(grade) {
             try? data.write(to: url)
+            looksCache = nil
             objectWillChange.send()
         }
     }
 
+    private var looksCache: [(name: String, url: URL)]?
+
+    /// Cached: this runs inside view bodies, and a directory read per
+    /// render is a main-thread stall waiting to happen.
     public func availableLooks() -> [(name: String, url: URL)] {
+        if let looksCache { return looksCache }
         let files = (try? FileManager.default.contentsOfDirectory(
             at: Self.looksDirectory, includingPropertiesForKeys: nil)) ?? []
-        return files.filter { $0.pathExtension == "kinelook" }
+        let looks = files.filter { $0.pathExtension == "kinelook" }
             .map { ($0.deletingPathExtension().lastPathComponent, $0) }
             .sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
+        looksCache = looks
+        return looks
     }
 
     public func loadLook(from url: URL) -> ShotGrade? {
@@ -4109,7 +4132,17 @@ public final class WorkspaceModel: ObservableObject {
     /// would just evict itself.
     private var primeQueue: [URL] = []
     private var primeTotal = 0
-    @Published public var previewPrimeProgress: (done: Int, total: Int)?
+
+    /// Prime progress on its own publisher: on the workspace it re-ran
+    /// the whole app's layout at 3 Hz for the entire priming pass.
+    public final class PrimeProgress: ObservableObject {
+        @Published public internal(set) var value: (done: Int, total: Int)?
+    }
+    public let primeProgress = PrimeProgress()
+    public internal(set) var previewPrimeProgress: (done: Int, total: Int)? {
+        get { primeProgress.value }
+        set { primeProgress.value = newValue }
+    }
 
     public func primeAllPreviews() {
         let bytesPerFrame: Int
