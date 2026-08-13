@@ -16,7 +16,7 @@ struct ShotDevelopView: View {
             VStack(spacing: 0) {
                 ShotPlayerView(workspace: workspace, large: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                KeyGlyphBar(workspace: workspace)
+                KeyGlyphBar(glyphs: workspace.keyGlyphs)
                 Divider()
                 shotStrip
             }
@@ -75,7 +75,7 @@ struct ShotDevelopView: View {
 /// Keycap chips that light while their key is held, so the controls teach
 /// themselves (the Swipe Verify pattern from npoc).
 struct KeyGlyphBar: View {
-    @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var glyphs: WorkspaceModel.KeyGlyphState
 
     var body: some View {
         HStack(spacing: 14) {
@@ -114,8 +114,8 @@ struct KeyGlyphBar: View {
     }
 
     private func pressed(_ key: String) -> Bool {
-        if key == "i+o" { return workspace.pressedKeys.contains("i") && workspace.pressedKeys.contains("o") }
-        return workspace.pressedKeys.contains(key)
+        if key == "i+o" { return glyphs.pressed.contains("i") && glyphs.pressed.contains("o") }
+        return glyphs.pressed.contains(key)
     }
 
     private func display(_ key: String) -> String {

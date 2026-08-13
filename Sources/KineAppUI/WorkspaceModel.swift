@@ -337,9 +337,10 @@ public final class WorkspaceModel: ObservableObject {
                     let ms = Double(DispatchTime.now().uptimeNanoseconds &- sent.uptimeNanoseconds) / 1e6
                     guard ms > 250, let self else { return }
                     MainActor.assumeIsolated {
-                        print(String(format: "[lag] main thread stalled %.0f ms · pending %d · decoding %d · thumbs %d · cache %.0f MB",
-                                     ms, self.previewPending.count, self.previewActiveCount,
-                                     self.thumbActiveCount, Double(self.shotFrameBytes) / 1e6))
+                        let line = String(format: "[lag] main thread stalled %.0f ms · pending %d · decoding %d · thumbs %d · cache %.0f MB\n",
+                                          ms, self.previewPending.count, self.previewActiveCount,
+                                          self.thumbActiveCount, Double(self.shotFrameBytes) / 1e6)
+                        FileHandle.standardError.write(Data(line.utf8))
                     }
                 }
                 Thread.sleep(forTimeInterval: 0.5)
@@ -3874,8 +3875,13 @@ public final class WorkspaceModel: ObservableObject {
     public enum ShotsViewMode: String { case bin, develop }
     @Published public var shotsViewMode: ShotsViewMode = .bin
 
-    /// Keys currently held, for the glyph bar (space/jkl/io/m/arrows).
-    @Published public var pressedKeys: Set<String> = []
+    /// Keys currently held, for the glyph bar. Its own ObservableObject
+    /// (the ShotTransport pattern): publishing keystrokes through the
+    /// workspace re-rendered every visible view per press.
+    public final class KeyGlyphState: ObservableObject {
+        @Published public var pressed: Set<String> = []
+    }
+    public let keyGlyphs = KeyGlyphState()
 
     /// Up/Down arrows and the strip buttons: move the selection through
     /// the ordered shots.
@@ -4132,8 +4138,21 @@ public final class WorkspaceModel: ObservableObject {
         previewPrimeProgress = nil
     }
 
+    private var primeProgressPublishScheduled = false
+
     private func updatePrimeProgress() {
-        previewPrimeProgress = primeQueue.isEmpty ? nil : (primeTotal - primeQueue.count, primeTotal)
+        if primeQueue.isEmpty {
+            previewPrimeProgress = nil
+            return
+        }
+        guard !primeProgressPublishScheduled else { return }
+        primeProgressPublishScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            self.primeProgressPublishScheduled = false
+            self.previewPrimeProgress = self.primeQueue.isEmpty
+                ? nil : (self.primeTotal - self.primeQueue.count, self.primeTotal)
+        }
     }
 
     /// Decode requests wait here; a small worker pool drains it LIFO so

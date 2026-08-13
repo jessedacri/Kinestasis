@@ -232,7 +232,7 @@ public struct KineRootView: View {
             if event.type == .keyUp {
                 if let chars = event.charactersIgnoringModifiers {
                     held.keys.remove(chars.lowercased())
-                    if let token = Self.glyphToken(chars) { workspace.pressedKeys.remove(token) }
+                    if let token = Self.glyphToken(chars) { workspace.keyGlyphs.pressed.remove(token) }
                 }
                 return event
             }
@@ -249,7 +249,7 @@ public struct KineRootView: View {
                 held.keys.insert(chars.lowercased())
             }
             if !event.isARepeat, !isCommand, let token = Self.glyphToken(chars) {
-                workspace.pressedKeys.insert(token)
+                workspace.keyGlyphs.pressed.insert(token)
             }
 
             // Shots workspace: transport acts on the focused (hovered /
