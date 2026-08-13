@@ -411,15 +411,17 @@ private struct ShotCard: View {
                     case .active(let p):
                         let frac = geo.size.width > 0 ? Double(p.x / geo.size.width) : 0
                         hoverFraction = max(0, min(1, frac))
-                        // Hover hands transport focus to this shot — same
-                        // as the source-viewer filmstrips: space/JKL act
-                        // on what's under the cursor.
+                        // Hover skims this shot in the player and hands it
+                        // transport focus (space/JKL act on what's under
+                        // the cursor) WITHOUT touching the selection — the
+                        // inspector keeps the clicked shot.
                         workspace.skimShot(shot.id, fraction: hoverFraction!)
                         if let url = skimURL(fraction: hoverFraction!) {
                             workspace.requestPreviewFrame(url)
                         }
                     case .ended:
                         hoverFraction = nil
+                        workspace.endSkim()
                     }
                 }
             }

@@ -164,17 +164,24 @@ public struct StillsIngest: Sendable {
         var results = [StillFrame?](repeating: nil, count: total)
         let lock = NSLock()
         var done = 0
+        // Leave cores free for the UI and the rest of the machine — an
+        // all-cores fan-out over thousands of files makes macOS crawl.
+        let workers = max(2, min(total, ProcessInfo.processInfo.activeProcessorCount - 2))
         results.withUnsafeMutableBufferPointer { buffer in
             let base = buffer.baseAddress!
-            DispatchQueue.concurrentPerform(iterations: total) { i in
-                var frame = self.probeStill(urls[i])
-                frame.pairedJpegURL = scanResult.jpegPairs[urls[i]]
-                lock.lock()
-                base[i] = frame
-                done += 1
-                let count = done
-                lock.unlock()
-                if count % 64 == 0 || count == total { progress?(count, total) }
+            DispatchQueue.concurrentPerform(iterations: workers) { w in
+                var i = w
+                while i < total {
+                    var frame = self.probeStill(urls[i])
+                    frame.pairedJpegURL = scanResult.jpegPairs[urls[i]]
+                    lock.lock()
+                    base[i] = frame
+                    done += 1
+                    let count = done
+                    lock.unlock()
+                    if count % 64 == 0 || count == total { progress?(count, total) }
+                    i += workers
+                }
             }
         }
         let frames = results.compactMap { $0 }

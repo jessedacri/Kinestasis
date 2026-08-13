@@ -259,7 +259,7 @@ public enum SequencePreset: CaseIterable, Hashable {
         case .hd1080_23_976:
             return SequenceSettings(frameRate: .twentyThree976, resolution: PixelSize(width: 1920, height: 1080))
         case .hd1080_24:
-            return SequenceSettings(frameRate: .twentyFour, resolution: PixelSize(width: 1920, height: 1080))
+            return SequenceSettings(frameRate: .twentyThree976, resolution: PixelSize(width: 1920, height: 1080))
         case .hd1080_25:
             return SequenceSettings(frameRate: .twentyFive, resolution: PixelSize(width: 1920, height: 1080))
         case .hd1080_29_97:

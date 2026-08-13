@@ -20,7 +20,7 @@ struct ShotGradePanel: View {
     var body: some View {
         if let shot = workspace.selectedShot {
             VStack(spacing: 0) {
-                playerArea(shot)
+                playerArea(workspace.previewShot ?? shot)
                 Divider()
                 ThinScrollView(axis: .vertical) {
                     VStack(alignment: .leading, spacing: 10) {
@@ -59,6 +59,7 @@ struct ShotGradePanel: View {
             .onReceive(workspace.shotTransport.$playheadFrame) { _ in rerenderPlayer(shot) }
             .onChange(of: workspace.previewVersion) { _, _ in rerenderPlayer(shot) }
             .onChange(of: shot.useJpegSource) { _, _ in rerenderPlayer(shot) }
+            .onChange(of: workspace.skimShotID) { _, _ in rerenderPlayer(shot) }
         } else {
             VStack(spacing: 6) {
                 Image(systemName: "camera.aperture")
@@ -77,7 +78,7 @@ struct ShotGradePanel: View {
     // MARK: - Player
 
     private func playerArea(_ shot: BurstShot) -> some View {
-        let schedule = workspace.scheduleForSelectedShot()
+        let schedule = workspace.scheduleForPreviewShot()
         let total = max(1, ShotTimingEngine.totalFrames(schedule))
         let fps = workspace.shotFrameRate.fps
         return VStack(spacing: 0) {
@@ -180,6 +181,9 @@ struct ShotGradePanel: View {
     /// chain — sliders and playback stay realtime; export is the exact
     /// RAW develop).
     private func rerenderPlayer(_ shot: BurstShot) {
+        // The player follows the skim when there is one; the passed-in
+        // (selected) shot only drives the inspector sections.
+        let shot = workspace.previewShot ?? shot
         guard let url = workspace.currentShotFrameURL() else { playerImage = nil; return }
         refreshExif(url)
         guard let base = workspace.cachedPreviewFrame(url) else {

@@ -535,7 +535,7 @@ struct ExportSheet: View {
 
     private var defaultSequence: Sequence {
         Sequence(name: "Default",
-                 settings: SequenceSettings(frameRate: .twentyFour, resolution: PixelSize(width: 1920, height: 1080)))
+                 settings: SequenceSettings(frameRate: .twentyThree976, resolution: PixelSize(width: 1920, height: 1080)))
     }
 
     private func syncAspectRatioFromCurrent() {

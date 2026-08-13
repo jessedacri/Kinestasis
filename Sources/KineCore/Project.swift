@@ -53,7 +53,7 @@ public struct ProjectSettings: Codable, Sendable {
     public var burst: BurstDefaults
 
     public static let `default` = ProjectSettings(
-        defaultFrameRate: .twentyFour,
+        defaultFrameRate: .twentyThree976,
         defaultResolution: PixelSize(width: 1920, height: 1080),
         defaultColorSpace: .rec709
     )

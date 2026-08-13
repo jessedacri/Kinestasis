@@ -3593,7 +3593,9 @@ public final class WorkspaceModel: ObservableObject {
         let ingester = stillsIngest
         let gap = project.settings.burst.gapThreshold
         let minBurst = project.settings.burst.minBurstCount
-        let result = await Task.detached(priority: .userInitiated) {
+        // Utility, not userInitiated: the probe fan-out competes with the
+        // UI and every other app when it runs at interactive priority.
+        let result = await Task.detached(priority: .utility) {
             ingester.ingest(folder: url, gapThreshold: gap, minBurstCount: minBurst) { done, total in
                 Task { @MainActor in self.importProgress = (done, total) }
             }
@@ -3825,6 +3827,10 @@ public final class WorkspaceModel: ObservableObject {
 
     /// Shot targeted by the Shot grade tab (set by clicking a bin row).
     @Published public var selectedShotID: ShotID?
+    /// Transient hover-skim target: the player previews this shot without
+    /// touching the selection; the inspector stays on the selected shot
+    /// until the user clicks (FCPX browser-skim model).
+    @Published public var skimShotID: ShotID?
     /// Clipboard for copy/paste grade across shots.
     @Published public var copiedShotGrade: ShotGrade?
 
@@ -3832,7 +3838,17 @@ public final class WorkspaceModel: ObservableObject {
         selectedShotID.flatMap { project.mediaPool.shots[$0] }
     }
 
+    public var skimmedShot: BurstShot? {
+        skimShotID.flatMap { project.mediaPool.shots[$0] }
+    }
+
+    /// What the player window shows: a hover skim wins, else the selection.
+    public var previewShot: BurstShot? { skimmedShot ?? selectedShot }
+
     public func selectShot(_ id: ShotID) {
+        // Clicking the shot under the cursor adopts the skim position as
+        // the new selection; the playhead stays where the skim put it.
+        if skimShotID == id { skimShotID = nil }
         selectedShotID = id
         // In Assemble mode the shot inspector lives in the Source pane's
         // Shot tab; the Shots workspace has its own inspector split.
@@ -3944,16 +3960,46 @@ public final class WorkspaceModel: ObservableObject {
         shotFrameCache[url]
     }
 
+    /// Decode requests wait here; a small worker pool drains it LIFO so
+    /// the frame under the cursor always decodes next. Unbounded
+    /// userInitiated fan-out (160 decodes per hovered shot) is what
+    /// brought the whole machine to a crawl on big archives.
+    private var previewPending: [URL] = []
+    private var previewPendingSet: Set<URL> = []
+    private var previewActiveCount = 0
+    private static let previewMaxConcurrent = 4
+    private static let previewPendingCap = 512
+
     /// Decode a preview frame off-main if it isn't cached; bumps
     /// `previewVersion` when it lands.
     public func requestPreviewFrame(_ url: URL) {
-        guard shotFrameCache[url] == nil, !shotFramesInFlight.contains(url) else { return }
-        shotFramesInFlight.insert(url)
-        Task.detached(priority: .userInitiated) {
-            let image = StillDecoder.preview(url: url, maxPixel: Self.shotFramePixels)
-            await MainActor.run {
-                self.shotFramesInFlight.remove(url)
-                if let image { self.storePreviewFrame(url: url, image: image) }
+        guard shotFrameCache[url] == nil,
+              !shotFramesInFlight.contains(url),
+              !previewPendingSet.contains(url) else { return }
+        previewPending.append(url)
+        previewPendingSet.insert(url)
+        while previewPending.count > Self.previewPendingCap {
+            previewPendingSet.remove(previewPending.removeFirst())
+        }
+        pumpPreviewDecodes()
+    }
+
+    private func pumpPreviewDecodes() {
+        let maxPixel = Self.shotFramePixels
+        while previewActiveCount < Self.previewMaxConcurrent, !previewPending.isEmpty {
+            let url = previewPending.removeLast()
+            previewPendingSet.remove(url)
+            guard shotFrameCache[url] == nil, !shotFramesInFlight.contains(url) else { continue }
+            shotFramesInFlight.insert(url)
+            previewActiveCount += 1
+            Task.detached(priority: .userInitiated) {
+                let image = StillDecoder.preview(url: url, maxPixel: maxPixel)
+                await MainActor.run {
+                    self.shotFramesInFlight.remove(url)
+                    self.previewActiveCount -= 1
+                    if let image { self.storePreviewFrame(url: url, image: image) }
+                    self.pumpPreviewDecodes()
+                }
             }
         }
     }
@@ -4062,11 +4108,18 @@ public final class WorkspaceModel: ObservableObject {
         return schedule(for: shot)
     }
 
+    /// Schedule for whatever the player is showing (skim or selection) —
+    /// the transport, playhead math, and trim keys all run against this.
+    public func scheduleForPreviewShot() -> [StillEvent] {
+        guard let shot = previewShot else { return [] }
+        return schedule(for: shot)
+    }
+
     // MARK: - Per-shot trim (non-destructive head/tail)
 
     /// Trim the head to the still under the playhead (kept).
     public func setShotTrimInAtPlayhead() {
-        guard let shot = selectedShot,
+        guard let shot = previewShot,
               let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
         var updated = shot
         updated.trimIn = min(shot.frames.count - 1, shot.trimIn + event.frameIndex)
@@ -4076,7 +4129,7 @@ public final class WorkspaceModel: ObservableObject {
 
     /// Trim the tail to the still under the playhead (kept).
     public func setShotTrimOutAtPlayhead() {
-        guard let shot = selectedShot,
+        guard let shot = previewShot,
               let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)) else { return }
         var updated = shot
         let absoluteIndex = shot.trimIn + event.frameIndex
@@ -4086,7 +4139,7 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     public func clearShotTrim() {
-        guard var shot = selectedShot else { return }
+        guard var shot = previewShot else { return }
         shot.trimIn = 0; shot.trimOut = 0
         applyTrim(shot)
     }
@@ -4113,7 +4166,7 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     public func shotPlay(rate: Double) {
-        guard let shot = selectedShot, !shot.frames.isEmpty else { return }
+        guard let shot = previewShot, !shot.frames.isEmpty else { return }
         prefetchPreviewFrames(for: shot)
         shotPlayRate = rate
         shotPlayTimer?.invalidate()
@@ -4132,27 +4185,43 @@ public final class WorkspaceModel: ObservableObject {
 
     public func shotStepFrames(_ n: Int64) {
         shotStop()
-        let total = ShotTimingEngine.totalFrames(scheduleForSelectedShot())
+        let total = ShotTimingEngine.totalFrames(scheduleForPreviewShot())
         guard total > 0 else { return }
         shotPlayheadFrame = max(0, min(total - 1, shotPlayheadFrame + n))
     }
 
-    /// Hover-skim: land the playhead at a fraction of the shot (also
-    /// selects it so space/JKL act on what's under the cursor — same
-    /// hover-hands-focus behavior as the source-viewer filmstrips).
+    /// Hover-skim: preview this shot in the player at a fraction of its
+    /// length. The selection is untouched — space/JKL act on what's under
+    /// the cursor, but the inspector keeps the clicked shot.
     public func skimShot(_ id: ShotID, fraction: Double) {
-        if selectedShotID != id {
-            selectedShotID = id
-            shotStop()
+        if previewShot?.id != id { shotStop() }
+        if id == selectedShotID {
+            skimShotID = nil
+        } else if skimShotID != id {
+            if skimShotID == nil { savedSelectedPlayhead = shotPlayheadFrame }
+            skimShotID = id
         }
         if let shot = project.mediaPool.shots[id] { prefetchPreviewFrames(for: shot) }
-        let total = ShotTimingEngine.totalFrames(scheduleForSelectedShot())
+        let total = ShotTimingEngine.totalFrames(scheduleForPreviewShot())
         guard total > 0 else { return }
         shotPlayheadFrame = max(0, min(total - 1, Int64((fraction * Double(total - 1)).rounded())))
     }
 
+    /// Playhead on the selected shot before a skim borrowed the player,
+    /// restored when the cursor leaves the grid.
+    private var savedSelectedPlayhead: Int64 = 0
+
+    /// Hover left the shots: the player returns to the selected shot at
+    /// the position it had before the skim.
+    public func endSkim() {
+        guard skimShotID != nil else { return }
+        skimShotID = nil
+        shotStop()
+        shotPlayheadFrame = savedSelectedPlayhead
+    }
+
     private func shotPlaybackTick() {
-        let schedule = scheduleForSelectedShot()
+        let schedule = scheduleForPreviewShot()
         let total = ShotTimingEngine.totalFrames(schedule)
         guard total > 0, shotPlayRate != 0 else { return }
         var next = shotPlayheadFrame + Int64(shotPlayRate.rounded())
@@ -4165,7 +4234,7 @@ public final class WorkspaceModel: ObservableObject {
     /// The still on screen at the current shot playhead, honoring the
     /// RAW/JPEG source toggle.
     public func currentShotFrameURL() -> URL? {
-        guard let shot = selectedShot else { return nil }
+        guard let shot = previewShot else { return nil }
         let frames = shot.effectiveFrames
         guard let event = ShotTimingEngine.event(at: shotPlayheadFrame, in: schedule(for: shot)),
               frames.indices.contains(event.frameIndex) else { return nil }
@@ -4174,24 +4243,40 @@ public final class WorkspaceModel: ObservableObject {
 
     // MARK: - Shot filmstrip thumbnails
 
+    /// A large import queues every shot at once; a small worker pool keeps
+    /// filmstrips arriving without soaking every core.
+    private var thumbPending: [BurstShot] = []
+    private var thumbActiveCount = 0
+    private static let thumbMaxConcurrent = 3
+
     public func scheduleShotThumbnails(for shot: BurstShot) {
         guard shotThumbnails[shot.id] == nil, !shotThumbsInFlight.contains(shot.id) else { return }
         shotThumbsInFlight.insert(shot.id)
-        let frames = shot.frames
-        let shotID = shot.id
-        let snapshot = shot
-        Task.detached(priority: .utility) {
+        thumbPending.append(shot)
+        pumpThumbnailQueue()
+    }
+
+    private func pumpThumbnailQueue() {
+        while thumbActiveCount < Self.thumbMaxConcurrent, !thumbPending.isEmpty {
+            let snapshot = thumbPending.removeFirst()
+            thumbActiveCount += 1
+            let frames = snapshot.frames
+            let shotID = snapshot.id
             let count = min(Self.shotThumbMax, frames.count)
             let urls: [URL] = (0..<count).map { i in
                 let idx = count == 1 ? 0
                     : Int((Double(i) / Double(count - 1) * Double(frames.count - 1)).rounded())
                 return snapshot.sourceURL(for: frames[idx])
             }
-            let images = urls.compactMap { StillDecoder.preview(url: $0, maxPixel: 200) }
-            await MainActor.run {
-                self.shotThumbnails[shotID] = images
-                self.shotThumbsInFlight.remove(shotID)
-                self.bumpPreviewsCoalesced()
+            Task.detached(priority: .utility) {
+                let images = urls.compactMap { StillDecoder.preview(url: $0, maxPixel: 200) }
+                await MainActor.run {
+                    self.shotThumbnails[shotID] = images
+                    self.shotThumbsInFlight.remove(shotID)
+                    self.thumbActiveCount -= 1
+                    self.bumpPreviewsCoalesced()
+                    self.pumpThumbnailQueue()
+                }
             }
         }
     }
@@ -4216,9 +4301,17 @@ public final class WorkspaceModel: ObservableObject {
     /// Batch-export shots to ProRes, one movie per shot. Driven by the
     /// export sheet: destination, codec, optional long-edge cap, optional
     /// FCPXML sidecar.
+    /// What to do when an export target file already exists. The sheet
+    /// asks the user; nothing ever overwrites silently.
+    public enum ExportConflictPolicy: Sendable {
+        case overwrite
+        case keepBoth
+    }
+
     public func exportShots(_ ids: [ShotID]?, codec: BurstShotExporter.Codec,
                             to directory: URL, longEdge: Int? = nil, bitrateMbps: Int? = nil,
-                            writeSidecar: Bool = false) {
+                            writeSidecar: Bool = false,
+                            conflicts conflictPolicy: ExportConflictPolicy = .overwrite) {
         let shots = ids.map { list in list.compactMap { project.mediaPool.shots[$0] } } ?? exportableShots
         guard !shots.isEmpty, shotExportProgress == nil else { return }
 
@@ -4237,12 +4330,16 @@ public final class WorkspaceModel: ObservableObject {
             for (i, shot) in shots.enumerated() {
                 if cancel.isCancelled { break }
                 do {
+                    let filename = conflictPolicy == .keepBoth
+                        ? nextFreeExportFilename(for: shot, codec: codec, in: directory)
+                        : nil
                     let movieURL = try exporter.export(
                         shot: shot,
                         mode: shot.timing(projectDefault: defaults),
                         rate: rate,
                         codec: codec,
                         to: directory,
+                        filename: filename,
                         maxLongEdge: longEdge,
                         bitrateMbps: bitrateMbps,
                         isCancelled: { cancel.isCancelled }
@@ -4283,6 +4380,7 @@ public final class WorkspaceModel: ObservableObject {
 
     // MARK: - On-brand notices (no system alerts)
 
+
     public struct Notice: Identifiable {
         public let id = UUID()
         public let title: String
@@ -4292,5 +4390,22 @@ public final class WorkspaceModel: ObservableObject {
 
     public func presentNotice(title: String, message: String) {
         activeNotice = Notice(title: title, message: message)
+    }
+}
+
+/// Keep Both naming: "<shot>_<codec>.mov" taken → "<shot>_<codec> 2.mov",
+/// " 3", … first free. nil when the base name is free (no rename needed).
+func nextFreeExportFilename(for shot: BurstShot, codec: BurstShotExporter.Codec,
+                            in directory: URL) -> String? {
+    let base = BurstShotExporter.outputURL(for: shot, codec: codec, in: directory)
+    guard FileManager.default.fileExists(atPath: base.path) else { return nil }
+    let stem = base.deletingPathExtension().lastPathComponent
+    var n = 2
+    while true {
+        let candidate = "\(stem) \(n).mov"
+        if !FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate).path) {
+            return candidate
+        }
+        n += 1
     }
 }
