@@ -5,8 +5,10 @@ import Foundation
 /// `rate` Hz, smoothstep-interpolated, scaled by intensity. Deterministic
 /// in the frame index so renders are reproducible.
 public enum ExposureWobble {
-    /// Peak EV swing at intensity 100.
-    public static let maxEV = 0.3
+    /// Peak EV swing at intensity 100. The renderer also derives a
+    /// contrast flutter from this signal, so full-intensity wobble reads
+    /// as real projector breathing, not a subtle brightness shimmer.
+    public static let maxEV = 0.85
 
     /// EV offset for an output frame. `intensity` 0…100, `rate` in Hz.
     public static func evOffset(outputFrame: Int64, fps: Double, intensity: Double, rate: Double) -> Double {

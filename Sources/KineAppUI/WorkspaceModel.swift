@@ -3845,9 +3845,11 @@ public final class WorkspaceModel: ObservableObject {
     /// What the player window shows: a hover skim wins, else the selection.
     public var previewShot: BurstShot? { skimmedShot ?? selectedShot }
 
-    /// The fullscreen processing view (Cmd+F in Shots mode): big player,
-    /// inspector at the side, skimmable shot strip below.
-    @Published public var shotsFullscreen = false
+    /// Bin (card grid) or Develop (one shot at a time: big player,
+    /// inspector at the side, skimmable strip below). Cmd+F jumps to
+    /// Develop and toggles native fullscreen with it.
+    public enum ShotsViewMode: String { case bin, develop }
+    @Published public var shotsViewMode: ShotsViewMode = .bin
 
     /// Keys currently held, for the glyph bar (space/jkl/io/m/arrows).
     @Published public var pressedKeys: Set<String> = []

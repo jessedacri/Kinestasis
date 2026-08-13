@@ -31,7 +31,7 @@ public final class ShotGradeRenderer: @unchecked Sendable {
         var effective = grade
         effective.exposure += evOffset
         guard var image = developed(url: url, grade: effective, maxPixel: maxPixel) else { return nil }
-        image = applyToneAndLook(image, grade: effective, isRAW: Self.rawExtensions.contains(url.pathExtension.lowercased()))
+        image = applyToneAndLook(image, grade: effective, isRAW: Self.rawExtensions.contains(url.pathExtension.lowercased()), wobbleEV: evOffset)
         if grade.grainAmount > 0 {
             image = applyGrain(image, grade: grade, seed: grainSeed)
         }
@@ -59,7 +59,7 @@ public final class ShotGradeRenderer: @unchecked Sendable {
                 "inputTargetNeutral": CIVector(x: 6500, y: 0),
             ])
         }
-        ci = applyToneAndLook(ci, grade: effective, isRAW: false)
+        ci = applyToneAndLook(ci, grade: effective, isRAW: false, wobbleEV: evOffset)
         if grade.grainAmount > 0 {
             ci = applyGrain(ci, grade: grade, seed: grainSeed)
         }
@@ -152,22 +152,46 @@ public final class ShotGradeRenderer: @unchecked Sendable {
         return image
     }
 
-    /// Shared downstream stages: highlights/shadows, contrast, saturation
-    /// or B&W, then the LUT mixed at intensity.
-    private func applyToneAndLook(_ input: CIImage, grade: ShotGrade, isRAW: Bool) -> CIImage {
+    /// Shared downstream stages, Lightroom-ordered: local highlight
+    /// recovery / shadow lift, then the parametric tone curve (contrast,
+    /// blacks/whites, the global halves of highlights/shadows, the user
+    /// curve), then saturation or B&W, then the LUT mixed at intensity.
+    /// `wobbleEV` also drives a per-frame contrast flutter so wobble reads
+    /// as projector breathing, not just brightness.
+    private func applyToneAndLook(_ input: CIImage, grade: ShotGrade, isRAW: Bool, wobbleEV: Double = 0) -> CIImage {
         var image = input
-        if grade.highlights != 0 || grade.shadows != 0 {
+        // The radius-aware halves: -highlights recovers blown areas,
+        // +shadows lifts blocked ones (CIHighlightShadowAdjust can only
+        // recover/lift; the opposite directions run through the curve).
+        let recovery = min(0, grade.highlights) / 100
+        let lift = max(0, grade.shadows) / 100
+        if recovery != 0 || lift != 0 {
             image = image.applyingFilter("CIHighlightShadowAdjust", parameters: [
-                "inputHighlightAmount": 1 - grade.highlights / 100 * 0.7,
-                "inputShadowAmount": grade.shadows / 100,
+                "inputHighlightAmount": 1 + recovery * 0.85,
+                "inputShadowAmount": lift,
+            ])
+        }
+        let contrastWobble = wobbleEV * 0.5
+        if GradeToneCurve.isActive(grade, contrastWobble: contrastWobble) {
+            let samples = GradeToneCurve.samples(grade: grade, contrastWobble: contrastWobble)
+            var data = Data(capacity: samples.count * 3 * MemoryLayout<Float>.size)
+            for s in samples {
+                withUnsafeBytes(of: s) { bytes in
+                    data.append(contentsOf: bytes)
+                    data.append(contentsOf: bytes)
+                    data.append(contentsOf: bytes)
+                }
+            }
+            image = image.applyingFilter("CIColorCurves", parameters: [
+                "inputCurvesData": data,
+                "inputCurvesDomain": CIVector(x: 0, y: 1),
+                "inputColorSpace": CGColorSpace(name: CGColorSpace.sRGB) as Any,
             ])
         }
         let saturation = grade.blackAndWhite ? 0 : 1 + grade.saturation / 100
-        let contrast = 1 + grade.contrast / 100 * 0.35
-        if saturation != 1 || contrast != 1 {
+        if saturation != 1 {
             image = image.applyingFilter("CIColorControls", parameters: [
                 kCIInputSaturationKey: saturation,
-                kCIInputContrastKey: contrast,
             ])
         }
         if let path = grade.lutPath, grade.lutIntensity > 0,

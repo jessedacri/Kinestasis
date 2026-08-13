@@ -203,6 +203,10 @@ struct ShotGradePanel: View {
                      get: \.highlights) { $0.highlights = $1 }
             gradeRow(shot, "Shadows", range: -100...100, format: "%+.0f",
                      get: \.shadows) { $0.shadows = $1 }
+            gradeRow(shot, "Whites", range: -100...100, format: "%+.0f",
+                     get: \.whites) { $0.whites = $1 }
+            gradeRow(shot, "Blacks", range: -100...100, format: "%+.0f",
+                     get: \.blacks) { $0.blacks = $1 }
             gradeRow(shot, "Saturation", range: -100...100, format: "%+.0f",
                      get: \.saturation) { $0.saturation = $1 }
                 .disabled(shot.grade.blackAndWhite)
@@ -228,6 +232,26 @@ struct ShotGradePanel: View {
                 .font(.system(size: 10))
                 .foregroundStyle(KineTheme.accent)
             }
+
+            HStack {
+                Text("TONE CURVE").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+                if shot.grade.toneCurve.count >= 2 {
+                    Button("Reset") { mutate(shot) { $0.toneCurve = [] } }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10))
+                        .foregroundStyle(KineTheme.accent)
+                }
+            }
+            .padding(.top, 6)
+            RampCurveEditor(
+                points: shot.grade.toneCurve,
+                onChange: { pts in mutate(shot) { $0.toneCurve = pts } }
+            )
+            .frame(height: 110)
+            Text("In to out brightness, applied after the sliders. Click to add points, drag to shape.")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
         }
     }
 

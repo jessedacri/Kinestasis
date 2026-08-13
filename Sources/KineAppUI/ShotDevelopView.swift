@@ -2,12 +2,13 @@ import SwiftUI
 import AppKit
 import KineCore
 
-/// Fullscreen processing view (Cmd+F): one specimen at a time. The
-/// selected shot fills the screen; scrub, grade, trim, mark, ramp, then
-/// move to the next with the arrows or the strip. The project bar rides
-/// above (ShotsWorkspaceView keeps it visible), the inspector sits at the
-/// side, and the skimmable shot strip stays reachable below.
-struct ShotProcessingView: View {
+/// Develop View: one specimen at a time. The selected shot fills the
+/// space; scrub, grade, trim, mark, ramp, then move to the next with the
+/// arrows or the strip. Selectable from the project bar (Bin | Develop);
+/// Cmd+F jumps here and toggles native fullscreen with it. The project
+/// bar rides above, the inspector sits at the side, and the skimmable
+/// shot strip stays reachable below.
+struct ShotDevelopView: View {
     @ObservedObject var workspace: WorkspaceModel
 
     var body: some View {
@@ -86,7 +87,7 @@ struct KeyGlyphBar: View {
             glyph(["m"], "mark still")
             glyph(["up", "down"], "prev / next")
             Spacer()
-            Text("Esc exits fullscreen")
+            Text("Esc leaves fullscreen, then Develop")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
         }

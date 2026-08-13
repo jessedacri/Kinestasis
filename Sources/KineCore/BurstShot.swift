@@ -90,9 +90,14 @@ public struct ShotGrade: Codable, Sendable, Hashable {
     public var contrast: Double      // -100 … +100
     public var temperature: Double   // -100 (cool) … +100 (warm)
     public var tint: Double          // -100 (green) … +100 (magenta)
-    public var highlights: Double    // -100 … +100
-    public var shadows: Double       // -100 … +100
+    public var highlights: Double    // -100 (recover) … +100 (brighten)
+    public var shadows: Double       // -100 (deepen) … +100 (lift)
+    public var whites: Double        // -100 … +100, white point
+    public var blacks: Double        // -100 … +100, black point
     public var saturation: Double    // -100 … +100
+    /// Hand-drawn tone curve (x: in, y: out, 0…1), applied after the
+    /// parametric sliders. Empty or < 2 points = identity.
+    public var toneCurve: [CurvePoint]
     public var blackAndWhite: Bool
     public var lutPath: String?
     public var lutIntensity: Double  // 0 … 100
@@ -102,19 +107,21 @@ public struct ShotGrade: Codable, Sendable, Hashable {
     public var grainAmount: Double     // 0 (off) … 100
     public var grainSize: Double       // 0.5 … 4, 1 = native noise scale
     public var grainResponse: Double   // -100 (shadows) … +100 (highlights), 0 = uniform
-    public var wobbleIntensity: Double // 0 (off) … 100 → up to ±0.3 EV
+    public var wobbleIntensity: Double // 0 (off) … 100 → up to ±0.85 EV + contrast flutter
     public var wobbleRate: Double      // Hz, 0.5 … 12
 
     public static let identity = ShotGrade()
 
     public init(exposure: Double = 0, contrast: Double = 0, temperature: Double = 0, tint: Double = 0,
-                highlights: Double = 0, shadows: Double = 0, saturation: Double = 0,
+                highlights: Double = 0, shadows: Double = 0, whites: Double = 0, blacks: Double = 0,
+                saturation: Double = 0, toneCurve: [CurvePoint] = [],
                 blackAndWhite: Bool = false, lutPath: String? = nil, lutIntensity: Double = 100,
                 grainAmount: Double = 0, grainSize: Double = 1, grainResponse: Double = 0,
                 wobbleIntensity: Double = 0, wobbleRate: Double = 4) {
         self.exposure = exposure; self.contrast = contrast
         self.temperature = temperature; self.tint = tint
         self.highlights = highlights; self.shadows = shadows
+        self.whites = whites; self.blacks = blacks; self.toneCurve = toneCurve
         self.saturation = saturation; self.blackAndWhite = blackAndWhite
         self.lutPath = lutPath; self.lutIntensity = lutIntensity
         self.grainAmount = grainAmount; self.grainSize = grainSize; self.grainResponse = grainResponse
@@ -122,7 +129,7 @@ public struct ShotGrade: Codable, Sendable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case exposure, contrast, temperature, tint, highlights, shadows, saturation
+        case exposure, contrast, temperature, tint, highlights, shadows, whites, blacks, saturation, toneCurve
         case blackAndWhite, lutPath, lutIntensity
         case grainAmount, grainSize, grainResponse, wobbleIntensity, wobbleRate
     }
@@ -135,7 +142,10 @@ public struct ShotGrade: Codable, Sendable, Hashable {
         tint = try c.decodeIfPresent(Double.self, forKey: .tint) ?? 0
         highlights = try c.decodeIfPresent(Double.self, forKey: .highlights) ?? 0
         shadows = try c.decodeIfPresent(Double.self, forKey: .shadows) ?? 0
+        whites = try c.decodeIfPresent(Double.self, forKey: .whites) ?? 0
+        blacks = try c.decodeIfPresent(Double.self, forKey: .blacks) ?? 0
         saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 0
+        toneCurve = try c.decodeIfPresent([CurvePoint].self, forKey: .toneCurve) ?? []
         blackAndWhite = try c.decodeIfPresent(Bool.self, forKey: .blackAndWhite) ?? false
         lutPath = try c.decodeIfPresent(String.self, forKey: .lutPath)
         lutIntensity = try c.decodeIfPresent(Double.self, forKey: .lutIntensity) ?? 100
@@ -148,7 +158,8 @@ public struct ShotGrade: Codable, Sendable, Hashable {
 
     public var isIdentity: Bool {
         exposure == 0 && contrast == 0 && temperature == 0 && tint == 0
-            && highlights == 0 && shadows == 0 && saturation == 0
+            && highlights == 0 && shadows == 0 && whites == 0 && blacks == 0
+            && saturation == 0 && toneCurve.count < 2
             && !blackAndWhite && (lutPath == nil || lutIntensity == 0)
             && grainAmount == 0 && wobbleIntensity == 0
     }

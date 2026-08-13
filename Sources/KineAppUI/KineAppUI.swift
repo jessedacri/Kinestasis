@@ -283,8 +283,12 @@ public struct KineRootView: View {
                     workspace.selectAdjacentShot(1)
                     return nil
                 case "\u{1B}":
-                    if workspace.shotsFullscreen {
-                        setShotsFullscreen(false)
+                    if isWindowFullscreen {
+                        setWindowFullscreen(false)
+                        return nil
+                    }
+                    if workspace.shotsViewMode == .develop {
+                        workspace.shotsViewMode = .bin
                         return nil
                     }
                     break
@@ -320,7 +324,10 @@ public struct KineRootView: View {
                     return nil
                 case "f":
                     if workspace.appMode == .shots {
-                        setShotsFullscreen(!workspace.shotsFullscreen)
+                        // Cmd+F is the processing gesture: land in Develop
+                        // and toggle native fullscreen with it.
+                        workspace.shotsViewMode = .develop
+                        setWindowFullscreen(!isWindowFullscreen)
                     } else {
                         setProgramFullscreen(!workspace.programFullscreen)
                     }
@@ -496,13 +503,14 @@ public struct KineRootView: View {
         }
     }
 
-    /// The Shots processing view and native window fullscreen move
-    /// together, so Cmd+F reads as one gesture.
-    private func setShotsFullscreen(_ on: Bool) {
-        workspace.shotsFullscreen = on
+    private var isWindowFullscreen: Bool {
+        (NSApp.keyWindow ?? NSApp.windows.first(where: { $0.contentView != nil }))?
+            .styleMask.contains(.fullScreen) ?? false
+    }
+
+    private func setWindowFullscreen(_ on: Bool) {
         let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.contentView != nil })
-        let isFS = win?.styleMask.contains(.fullScreen) ?? false
-        if on != isFS { win?.toggleFullScreen(nil) }
+        if on != isWindowFullscreen { win?.toggleFullScreen(nil) }
     }
 
     private func removeKeyMonitor() {

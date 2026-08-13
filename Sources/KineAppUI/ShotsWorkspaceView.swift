@@ -20,8 +20,8 @@ struct ShotsWorkspaceView: View {
             Divider()
             if workspace.orderedShots.isEmpty {
                 emptyDropZone
-            } else if workspace.shotsFullscreen {
-                ShotProcessingView(workspace: workspace)
+            } else if workspace.shotsViewMode == .develop {
+                ShotDevelopView(workspace: workspace)
             } else {
                 KineSplitView(
                     isVertical: true,
@@ -49,6 +49,13 @@ struct ShotsWorkspaceView: View {
             } label: {
                 Label("Import Folder…", systemImage: "square.and.arrow.down")
                     .font(.system(size: 11, weight: .semibold))
+            }
+
+            Divider().frame(height: 16)
+
+            HStack(spacing: 2) {
+                viewModeButton("Bin", .bin)
+                viewModeButton("Develop", .develop)
             }
 
             Divider().frame(height: 16)
@@ -169,6 +176,22 @@ struct ShotsWorkspaceView: View {
     }
 
 
+
+    private func viewModeButton(_ label: String, _ mode: WorkspaceModel.ShotsViewMode) -> some View {
+        let active = workspace.shotsViewMode == mode
+        return Button {
+            workspace.shotsViewMode = mode
+        } label: {
+            Text(label)
+                .font(.system(size: 11, weight: active ? .semibold : .regular))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(active ? KineTheme.accent.opacity(0.22) : Color.clear)
+                .foregroundStyle(active ? KineTheme.accent : .secondary)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
 
     private func gapLabel(_ gap: Double) -> String {
         String(format: gap < 1 ? "%.1f s" : "%.0f s", gap)
