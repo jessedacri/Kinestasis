@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Kinestasis is a macOS app that turns burst-mode photo sets into video clips. Drag in a folder of stills (JPEG + OEM RAW); the app groups them into shots by capture-time gaps, previews them as draggable filmstrips, applies per-clip cadence (frames-per-still / as-shot timing / frame-skip), camera-raw-style grades, LUTs, film grain, and batch-exports ProRes clips at native resolution plus XML for NLE handoff. The signature aesthetic: 8–12 fps stills cadence, silent-film feel.
+Kinestasis is a macOS app that turns burst-mode photo sets into video clips. Drag in a folder of stills (JPEG + OEM RAW); the app groups them into shots by capture-time gaps, previews them as skimmable filmstrips, applies per-clip cadence (frames-per-still / as-shot timing, with frame skip as an independent stacking setting), speed ramps (hand-drawn or generated holds), camera-raw-style grades, LUTs, film grain, and batch-exports ProRes/H.264/HEVC clips at native resolution plus XML for NLE handoff. Stills selection rides along: mark frames with M and exports deliver graded full-res JPEGs (plus originals/RAW) beside the movies, replacing a separate Lightroom pass. The signature aesthetic: 8–12 fps stills cadence, silent-film feel.
 
 **Standalone WCID project** (registered with the portfolio manager, ~/WCID). Forked from Preem (the macOS NLE, `~/Preem`) on 2026-08-10 — same layered engine, pointed at a different product — and now fully independent: Preem continues separately and is never modified from here. The originating work order (`WCID-WORKORDER.md`) is closed.
 
