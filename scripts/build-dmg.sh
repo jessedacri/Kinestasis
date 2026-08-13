@@ -24,9 +24,9 @@ TEAM_ID="4ND7U9JZ8C"
 SIGNING_IDENTITY="Developer ID Application: Jesse Dacri (${TEAM_ID})"
 NOTARY_PROFILE="polymerge-notary"
 
-SHORT_VERSION="0.1.0"
+SHORT_VERSION="0.1.1"
 BUILD_VERSION="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
-DMG_LABEL="${DMG_LABEL:-Kinestasis 0.1}"
+DMG_LABEL="${DMG_LABEL:-Kinestasis ${SHORT_VERSION}}"
 
 BUILD_DIR="build"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
@@ -85,6 +85,36 @@ sed -e "s/__SHORT_VERSION__/${SHORT_VERSION}/g" \
     "${INFO_PLIST_TEMPLATE}" > "${APP_BUNDLE}/Contents/Info.plist"
 plutil -lint "${APP_BUNDLE}/Contents/Info.plist" >/dev/null || fail "Info.plist lint failed"
 ok "Info.plist (v${SHORT_VERSION} build ${BUILD_VERSION}) + icon staged"
+
+step "Launch smoke test (dev .build masked)"
+# Bundle.module's generated accessor falls back to this machine's absolute
+# .build path, which hides missing-resource packaging bugs until the app
+# runs on another Mac (the 0.1.0 launch crash). Mask .build so the packaged
+# app must stand alone; a window will flash for a few seconds.
+SMOKE_LOG="/tmp/kinestasis-smoke.log"
+SMOKE_MASK=""
+if [[ -d ".build" ]]; then
+    SMOKE_MASK=".build.smoke-masked"
+    mv ".build" "${SMOKE_MASK}"
+fi
+"${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" > "${SMOKE_LOG}" 2>&1 &
+SMOKE_PID=$!
+sleep 4
+SMOKE_ALIVE=0
+if kill -0 "${SMOKE_PID}" 2>/dev/null; then
+    SMOKE_ALIVE=1
+    kill "${SMOKE_PID}" 2>/dev/null || true
+fi
+wait "${SMOKE_PID}" 2>/dev/null || true
+if [[ -n "${SMOKE_MASK}" ]]; then
+    mv "${SMOKE_MASK}" ".build"
+fi
+if [[ "${SMOKE_ALIVE}" == "1" ]]; then
+    ok "Packaged app survived launch without dev fallbacks"
+else
+    sed 's/^/    /' "${SMOKE_LOG}"
+    fail "Packaged app died at launch — see ${SMOKE_LOG}"
+fi
 
 step "Code signing"
 # SPM resource bundles are data-only — the .app seal covers them; only

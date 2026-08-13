@@ -1,0 +1,135 @@
+Received from Jesse 2026-08-13 via chat. From the main user's machine
+(MacBookPro18,2, macOS 26.5.2), NOT the dev machine. Pasted as received below.
+
+-------------------------------------
+Translated Report (Full Report Below)
+-------------------------------------
+Process:             Kinestasis [12776]
+Path:                /Applications/Kinestasis.app/Contents/MacOS/Kinestasis
+Identifier:          com.jessedacri.kinestasis
+Version:             0.1.0 (55)
+Code Type:           ARM-64 (Native)
+Role:                Foreground
+Parent Process:      launchd [1]
+Coalition:           com.jessedacri.kinestasis [3865]
+User ID:             501
+
+Date/Time:           2026-08-13 15:08:21.3058 -0400
+Launch Time:         2026-08-13 15:08:18.5248 -0400
+Hardware Model:      MacBookPro18,2
+OS Version:          macOS 26.5.2 (25F84)
+Release Type:        User
+
+Crash Reporter Key:  30C7269A-057B-3172-971D-3A5E75133F36
+Incident Identifier: DD96E9BD-63B6-46F2-A32B-EF61EACAB033
+
+Sleep/Wake UUID:       98224EE1-79DF-4D7B-BA71-6D35B69DE16C
+
+Time Awake Since Boot: 24000 seconds
+Time Since Wake:       4801 seconds
+
+System Integrity Protection: enabled
+
+Triggered by Thread: 0, Dispatch Queue: com.apple.main-thread
+
+Exception Type:    EXC_BREAKPOINT (SIGTRAP)
+Exception Codes:   0x0000000000000001, 0x0000000195a98cc8
+
+Termination Reason:  Namespace SIGNAL, Code 5, Trace/BPT trap: 5
+Terminating Process: exc handler [12776]
+
+
+Thread 0 Crashed::  Dispatch queue: com.apple.main-thread
+0   libswiftCore.dylib                       0x195a98cc8 _assertionFailure(_:_:file:line:flags:) + 172
+1   Kinestasis                               0x1025191a4 closure #1 in variable initialization expression of static NSBundle.module + 612
+2   Kinestasis                               0x102518f30 one-time initialization function for module + 12
+3   libdispatch.dylib                        0x1820d84b0 _dispatch_client_callout + 16
+4   libdispatch.dylib                        0x1820c1630 _dispatch_once_callout + 32
+5   Kinestasis                               0x10251831c AppDelegate.applicationDidFinishLaunching(_:) + 1036
+6   Kinestasis                               0x1025183e4 @objc AppDelegate.applicationDidFinishLaunching(_:) + 112
+7   SwiftUI                                  0x1b80cc03c AppDelegate.applicationDidFinishLaunching(_:) + 888
+8   SwiftUI                                  0x1b80cd80c @objc AppDelegate.applicationWillFinishLaunching(_:) + 192
+9   CoreFoundation                           0x18232b9bc __CFNOTIFICATIONCENTER_IS_CALLING_OUT_TO_AN_OBSERVER__ + 148
+10  CoreFoundation                           0x1823b808c ___CFXRegistrationPost_block_invoke + 92
+11  CoreFoundation                           0x1823b7fd0 _CFXRegistrationPost + 440
+12  CoreFoundation                           0x1822fa3d0 _CFXNotificationPost + 740
+13  Foundation                               0x183b2f4a4 -[NSNotificationCenter postNotificationName:object:userInfo:] + 88
+14  AppKit                                   0x18676c5e8 -[NSApplication _postDidFinishNotification] + 308
+15  AppKit                                   0x18676c380 -[NSApplication _sendFinishLaunchingNotification] + 172
+16  AppKit                                   0x18676a9c4 -[NSApplication(NSAppleEventHandling) _handleAEOpenEvent:] + 488
+17  AppKit                                   0x18676a5d8 -[NSApplication(NSAppleEventHandling) _handleCoreEvent:withReplyEvent:] + 488
+18  Foundation                               0x183b57fbc -[NSAppleEventManager dispatchRawAppleEvent:withRawReply:handlerRefCon:] + 316
+19  Foundation                               0x183b57db4 _NSAppleEventManagerGenericHandler + 80
+20  AE                                       0x18a567f34 0x18a55d000 + 44852
+21  AE                                       0x18a56788c 0x18a55d000 + 43148
+22  AE                                       0x18a560fb8 aeProcessAppleEvent + 484
+23  HIToolbox                                0x18f074344 AEProcessAppleEvent + 68
+24  AppKit                                   0x186764348 _DPSNextEvent + 1284
+25  AppKit                                   0x1872f98b0 -[NSApplication(NSEventRouting) _nextEventMatchingEventMask:untilDate:inMode:dequeue:] + 688
+26  AppKit                                   0x1872f95bc -[NSApplication(NSEventRouting) nextEventMatchingMask:untilDate:inMode:dequeue:] + 72
+27  AppKit                                   0x18675713c -[NSApplication run] + 368
+28  AppKit                                   0x18672f7b0 NSApplicationMain + 880
+29  SwiftUI                                  0x1b70e147c specialized runApp(_:) + 140
+30  SwiftUI                                  0x1b74974a4 runApp<A>(_:) + 104
+31  SwiftUI                                  0x1b7763344 static App.main() + 224
+32  Kinestasis                               0x102518524 KineApp_main + 40
+33  dyld                                     0x181ebbe00 start + 6992
+
+Thread 8:: com.apple.NSEventThread
+0   libsystem_kernel.dylib                   0x182235c34 mach_msg2_trap + 8
+1   libsystem_kernel.dylib                   0x182248574 mach_msg2_internal + 76
+2   libsystem_kernel.dylib                   0x18223e9c0 mach_msg_overwrite + 480
+3   libsystem_kernel.dylib                   0x182235fc0 mach_msg + 24
+4   CoreFoundation                           0x1823370d8 __CFRunLoopServiceMachPort + 160
+5   CoreFoundation                           0x1823359c4 __CFRunLoopRun + 1188
+6   CoreFoundation                           0x1824081c4 _CFRunLoopRunSpecificWithOptions + 532
+7   AppKit                                   0x186885c7c _NSEventThread + 184
+8   libsystem_pthread.dylib                  0x182279c58 _pthread_start + 136
+9   libsystem_pthread.dylib                  0x182274c1c thread_start + 8
+
+(Threads 1-7 idle, no frames of interest.)
+
+Thread 0 crashed with ARM Thread State (64-bit):
+    x0: 0x00000007d3630a08   x1: 0x0000000200000003   x2: 0x0000000000000060   x3: 0xfffff0007fc00000
+    x4: 0x000000042a068240   x5: 0x0000000000000013   x6: 0x0000000000000020   x7: 0xfffff0003ffff800
+    x8: 0xfffffffe00000000   x9: 0x000000007fbdefe3  x10: 0x0000000000000000  x11: 0x0000000000000000
+   x12: 0x0005602a8042101c  x13: 0x000550278042082a  x14: 0x0000000000021000  x15: 0x000000000000003d
+   x16: 0x0000000200000003  x17: 0x0000000000000003  x18: 0x0000000000000000  x19: 0x40000007d4648c80
+   x20: 0x000000016d8e9a70  x21: 0xc000000000000036  x22: 0xb249e93d3f7c16f2  x23: 0x0000000102830ca0
+   x24: 0xd000000000000058  x25: 0x00000001028d8000  x26: 0x00000001028d7000  x27: 0x0000000000000028
+   x28: 0x0000000000000078   fp: 0x000000016d8e9a30   lr: 0x0000000195a98cc8
+    sp: 0x000000016d8e99b0   pc: 0x0000000195a98cc8 cpsr: 0x60001000
+   far: 0x0000000000000000  esr: 0xf2000001 (Breakpoint) brk 1
+
+Binary Images (relevant):
+       0x102514000 -        0x1028b7fff com.jessedacri.kinestasis (0.1.0) <96238df5-c860-30f4-8b75-6399471ad35f> /Applications/Kinestasis.app/Contents/MacOS/Kinestasis
+       0x195938000 -        0x195ed97bf libswiftCore.dylib (*) <7669d858-d332-36c7-9c6c-4564ffbea8d2> /usr/lib/swift/libswiftCore.dylib
+
+Key fields from the Full Report JSON (full paste retained in chat transcript):
+  "app_version" : "0.1.0", "build_version" : "55"
+  "slice_uuid" : "96238df5-c860-30f4-8b75-6399471ad35f"
+  "procPath" : "/Applications/Kinestasis.app/Contents/MacOS/Kinestasis"
+  "osVersion" : "macOS 26.5.2 (25F84)", "modelCode" : "MacBookPro18,2"
+  "exception" : EXC_BREAKPOINT (SIGTRAP), codes 0x1, 0x195a98cc8
+  "codeSigningTeamID" : "4ND7U9JZ8C", trust level valid (notarized launch)
+  faulting frames:
+    _assertionFailure (libswiftCore)
+    closure #1 in variable initialization expression of static NSBundle.module +612 (Kinestasis, imageOffset 20900)
+    one-time initialization function for module +12 (imageOffset 20272)
+    _dispatch_once_callout
+    AppDelegate.applicationDidFinishLaunching(_:) +1036 (imageOffset 17180)
+
+=== Symbolication note (2026-08-13, this repo) ===
+The crashing binary UUID 96238df5-c860-30f4-8b75-6399471ad35f matches
+build/Kinestasis.app (0.1.0 build 55) still present in this repo. The crashing
+frame is the SwiftPM-generated resource-bundle accessor
+(.build/arm64-apple-macosx/release/KineApp.build/DerivedSources/
+resource_bundle_accessor.swift): `static let module` searches exactly two
+paths — Bundle.main.bundleURL + "Kinestasis_KineApp.bundle" (the .app ROOT,
+not Contents/Resources where build-dmg.sh stages it) and the absolute
+compile-time path /Users/jessedacri/Kinestasis/.build/arm64-apple-macosx/
+release/Kinestasis_KineApp.bundle — then Swift.fatalError (the SIGTRAP) if
+both fail. On the dev machine the second path exists, masking the bug; on any
+other machine both candidates fail and the app traps in
+applicationDidFinishLaunching, which loads KineIcon.png via Bundle.module
+(Sources/KineApp/KineApp.swift:107).

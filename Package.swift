@@ -80,7 +80,7 @@ let package = Package(
 
         .executableTarget(
             name: "KineApp",
-            dependencies: ["KineAppUI"],
+            dependencies: ["KineAppUI", "KineCore"],
             resources: [.process("Resources")]
         ),
 

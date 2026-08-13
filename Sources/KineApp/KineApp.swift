@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import KineAppUI
+import KineCore
 
 @main
 struct KineApp: App {
@@ -104,7 +105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // set it at runtime). The mark: a burst card with amber motion
         // echoes, drawn on the standard 824/1024 icon grid so it sits at
         // the same size as every other Dock icon.
-        if let url = Bundle.module.url(forResource: "KineIcon", withExtension: "png"),
+        // Never Bundle.module here: its generated accessor traps off the
+        // dev machine (launch crash 2026-08-13, crash/).
+        if let url = ResourceBundle.locate(named: "Kinestasis_KineApp.bundle")?
+                .url(forResource: "KineIcon", withExtension: "png"),
            let img = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = img
         }
