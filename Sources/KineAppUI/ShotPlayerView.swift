@@ -198,8 +198,11 @@ struct ShotPlayerView: View {
         guard let shot = workspace.previewShot,
               let url = workspace.currentShotFrameURL() else { playerImage = nil; return }
         if workspace.shotPlayRate == 0 { workspace.scheduleRefinedFrame() }
+        // Always (re)request: a no-op when the cached frame is current,
+        // a background re-decode when it predates a quality switch - the
+        // on-screen frame sharpens in place when the new decode lands.
+        workspace.requestPreviewFrame(url)
         guard let base = workspace.cachedRefinedFrame(url) ?? workspace.cachedPreviewFrame(url) else {
-            workspace.requestPreviewFrame(url)
             return   // previewVersion bump re-triggers when the decode lands
         }
         let grade = shot.grade

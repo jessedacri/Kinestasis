@@ -3979,25 +3979,29 @@ public final class WorkspaceModel: ObservableObject {
     /// Eviction is by memory, not count; High gets a bigger budget since
     /// its frames are ~16x Draft.
     private var shotFrameByteBudget: Int {
-        previewQuality == .high ? 1_400_000_000 : 700_000_000
+        previewQuality == .high ? 2_500_000_000 : 700_000_000
     }
     private var shotFrameBytes = 0
     private var shotFramePixels: Int { previewQuality.maxPixel }
 
     /// Skim/playback decode size in DEVICE pixels (a retina point is two
-    /// of them, which is why the old 448/720/1080 point-ish sizes read
-    /// blurry on any HiDPI screen). All tiers decode from the embedded
-    /// camera preview, so playback stays realtime; High is the full
-    /// embedded preview on most bodies (X-Pro2 1920, Sony 1616).
+    /// of them). Draft and Balanced decode the embedded camera preview -
+    /// instant, but capped at what the camera wrote (X-Pro2 1920, Sony
+    /// 1616) and carrying camera-JPEG detail. High bypasses embedded
+    /// previews entirely: real RAW develops at 2560, primed in the
+    /// background and cached, so playback sharpens to true quality as
+    /// frames finish.
     public enum PreviewQuality: String, CaseIterable, Sendable {
         case draft, balanced, high
         public var maxPixel: Int {
             switch self {
             case .draft: return 448
             case .balanced: return 960
-            case .high: return 1920
+            case .high: return 2560
             }
         }
+        /// High skips the embedded-preview shortcut and develops for real.
+        public var usesFullDecode: Bool { self == .high }
         public var label: String {
             switch self {
             case .draft: return "Draft"
@@ -4040,6 +4044,8 @@ public final class WorkspaceModel: ObservableObject {
     /// is what makes small-preview RAWs like Sony ARW sharp when paused)
     /// and swap it in under the grade.
     public func scheduleRefinedFrame() {
+        // High tier already develops at refine resolution.
+        guard !previewQuality.usesFullDecode else { return }
         refineGeneration += 1
         let generation = refineGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -4089,6 +4095,7 @@ public final class WorkspaceModel: ObservableObject {
 
     private func pumpPreviewDecodes() {
         let maxPixel = shotFramePixels
+        let fullDecode = previewQuality.usesFullDecode
         let epoch = cacheEpoch
         while previewActiveCount < Self.previewMaxConcurrent, !previewPending.isEmpty {
             let url = previewPending.removeLast()
@@ -4098,7 +4105,9 @@ public final class WorkspaceModel: ObservableObject {
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
             Task.detached(priority: .userInitiated) {
-                let image = StillDecoder.preview(url: url, maxPixel: maxPixel)
+                let image = fullDecode
+                    ? StillDecoder.decode(url: url, maxPixel: maxPixel)
+                    : StillDecoder.preview(url: url, maxPixel: maxPixel)
                 await MainActor.run {
                     self.shotFramesInFlight.remove(url)
                     self.previewActiveCount -= 1

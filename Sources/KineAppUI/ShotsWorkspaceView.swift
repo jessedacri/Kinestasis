@@ -116,7 +116,7 @@ struct ShotsWorkspaceView: View {
                         workspace.setPreviewQuality(q)
                     }
                 }
-                Text("Playback decode size, not export. Frames sharpen in place after a change; paused frames always refine to near-full quality.")
+                Text("Playback quality, not export. Draft and Balanced use the camera's embedded previews (instant). High develops the real RAW at 2560 px in the background: playback sharpens as frames finish. Paused frames always refine to full quality.")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
