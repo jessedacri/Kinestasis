@@ -48,6 +48,24 @@
 
   <div class="release">
     <div class="release-head">
+      <span class="version">0.1.4</span>
+      <span class="date">Aug 13, 2026</span>
+    </div>
+    <ul>
+      <li><b>Develop View.</b> Process one burst at a time: big player, grading at the side, the skimmable shot strip below, prev/next with the arrow keys, and key hints that light up as you press. The top bar now reads VIEW: Bin, Develop, Assemble. Cmd+F jumps to Develop in fullscreen; Esc steps back out.</li>
+      <li><b>Preview quality tiers.</b> A Preview control by the export button: Draft, Balanced, or High. High develops the real RAW at 2560 px in the background and playback sharpens as frames finish. Paused frames always refine to near-full quality. Importing shows a Generating previews bar; your clicks and scrubs always jump the queue.</li>
+      <li><b>Grading overhaul.</b> Highlights now goes the right direction (up brightens, down recovers). New Whites and Blacks sliders. A tone curve editor below the sliders. Contrast is a proper S-curve with a much wider range. Wobble is actually visible now, breathing exposure and contrast together.</li>
+      <li><b>Hold on This Still, finished.</b> Hold length in frames, separate ease in and ease out, and an optional "then skip" that drops stills when the hold releases, as if the cadence kept running underneath.</li>
+    </ul>
+    <ul class="fix">
+      <li>JPEG bursts previewed from the camera's 160 px thumbnail no matter the quality setting. They now decode properly at every tier; the brief shrunken low-quality flash while scrubbing is gone.</li>
+      <li>Playback and scrubbing no longer freeze the app. Seven separate causes found and fixed; a two-minute stress run over the full 221-burst archive now shows near-zero interruptions.</li>
+      <li>Long bursts no longer degrade after the first playback loop.</li>
+    </ul>
+  </div>
+
+  <div class="release">
+    <div class="release-head">
       <span class="version">0.1.3</span>
       <span class="date">Aug 13, 2026</span>
     </div>
