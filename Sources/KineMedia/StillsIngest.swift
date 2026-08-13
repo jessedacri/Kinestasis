@@ -232,9 +232,13 @@ public enum StillDecoder {
         return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
     }
 
-    /// Fast preview decode preferring an embedded thumbnail when one is
+    /// Fast preview decode preferring an embedded preview when one is
     /// large enough — RAW files carry full-scene JPEG previews, so skimming
-    /// large RAWs never pays a RAW develop.
+    /// large RAWs never pays a RAW develop. Plain JPEGs embed only a
+    /// 160x120 EXIF thumbnail (4:3, wrong aspect too): if the embedded
+    /// image is far below the request, fall through to a real decode —
+    /// scaled JPEG decodes are fast, and a 160px frame poisoned every
+    /// preview tier for JPEG bursts.
     public static func preview(url: URL, maxPixel: Int) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
             return nil
@@ -245,6 +249,24 @@ public enum StillDecoder {
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
             kCGImageSourceShouldCacheImmediately: true,
         ]
-        return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+        let embedded = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+        if let embedded {
+            let embeddedLong = max(embedded.width, embedded.height)
+            var nativeLong = 0
+            if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+                let w = props[kCGImagePropertyPixelWidth] as? Int ?? 0
+                let h = props[kCGImagePropertyPixelHeight] as? Int ?? 0
+                nativeLong = max(w, h)
+            }
+            let target = nativeLong > 0 ? min(maxPixel, nativeLong) : maxPixel
+            if embeddedLong * 10 >= target * 7 { return embedded }
+        }
+        let full: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, full as CFDictionary)
     }
 }
