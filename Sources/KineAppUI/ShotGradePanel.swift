@@ -225,7 +225,8 @@ struct ShotGradePanel: View {
             Text("TIMING").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
             HStack {
                 Menu {
-                    TimingModePicker(current: shot.timingOverride, allowDefault: true) { picked in
+                    TimingModePicker(current: shot.timingOverride, allowDefault: true,
+                                     captureFPS: shot.approxCaptureFPS, outputRate: rate) { picked in
                         workspace.setShotTiming(picked, for: shot.id)
                     }
                 } label: {
@@ -243,13 +244,27 @@ struct ShotGradePanel: View {
                 }
                 .toggleStyle(.checkbox)
             }
-            Text(String(format: "%d stills%@ · %@ · shot over %.1fs · plays %.1fs @ %@",
-                        shot.frames.count,
-                        shot.isTrimmed ? " (trimmed to \(shot.effectiveFrames.count))" : "",
-                        shot.fileTypeLabel, shot.captureSpan, seconds, rate.rawValue))
+            Text(metadataBits(shot, seconds: seconds, rate: rate).joined(separator: " · "))
                 .font(KineTheme.monoSmall)
                 .foregroundStyle(KineTheme.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func metadataBits(_ shot: BurstShot, seconds: Double, rate: FrameRate) -> [String] {
+        var bits: [String] = []
+        bits.append("\(shot.frames.count) stills"
+            + (shot.isTrimmed ? " (trimmed to \(shot.effectiveFrames.count))" : ""))
+        bits.append(shot.fileTypeLabel)
+        if shot.captureSpan > 0 {
+            if let fps = shot.approxCaptureFPSLabel {
+                bits.append(String(format: "shot over %.1fs at %@", shot.captureSpan, fps))
+            } else {
+                bits.append(String(format: "shot over %.1fs", shot.captureSpan))
+            }
+        }
+        bits.append(String(format: "plays %.1fs @ %@", seconds, rate.rawValue))
+        return bits
     }
 
     // MARK: - Frame source (RAW / JPEG pairs)

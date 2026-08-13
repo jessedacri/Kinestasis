@@ -303,7 +303,8 @@ private struct BurstShotRow: View {
         .onAppear { workspace.scheduleShotThumbnails(for: shot) }
         .contextMenu {
             Menu("Timing") {
-                TimingModePicker(current: shot.timingOverride, allowDefault: true) { mode in
+                TimingModePicker(current: shot.timingOverride, allowDefault: true,
+                                 captureFPS: shot.approxCaptureFPS, outputRate: rate) { mode in
                     workspace.setShotTiming(mode, for: shot.id)
                 }
             }
@@ -311,6 +312,11 @@ private struct BurstShotRow: View {
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
             Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
                 .disabled(workspace.copiedShotGrade == nil)
+            if shot.hasRawJpegPairs {
+                Button(shot.useJpegSource ? "Use RAW Source" : "Use JPEG Source") {
+                    workspace.setUseJpegSource(!shot.useJpegSource, for: shot.id)
+                }
+            }
             Button("Export Shot…") { workspace.beginShotExport([shot.id]) }
             Divider()
             Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
@@ -361,9 +367,16 @@ private struct BurstShotRow: View {
                 Image(systemName: "square.stack.3d.down.forward")
                     .font(.system(size: 9))
                     .foregroundStyle(KineTheme.accent)
-                Text(shot.name)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(shot.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    if let fps = shot.approxCaptureFPSLabel {
+                        Text("\(fps) capture")
+                            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.65))
+                    }
+                }
                 if shot.timingOverride != nil {
                     Text(timingModeLabel(mode))
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -397,14 +410,18 @@ private struct BurstShotRow: View {
         var bits: [String] = []
         bits.append("\(shot.frames.count) stills")
         if shot.captureSpan > 0 {
-            bits.append(String(format: "shot over %.1fs", shot.captureSpan))
+            if let fps = shot.approxCaptureFPSLabel {
+                bits.append(String(format: "shot over %.1fs at %@", shot.captureSpan, fps))
+            } else {
+                bits.append(String(format: "shot over %.1fs", shot.captureSpan))
+            }
         }
         bits.append(String(format: "%.1fs @ %@", outSeconds, rate.rawValue))
         bits.append(timingModeLabel(mode) + (shot.timingOverride == nil ? " (default)" : ""))
         return Text(bits.joined(separator: " · "))
             .font(KineTheme.monoSmall)
             .foregroundStyle(KineTheme.textMuted)
-            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 2)
     }
 }
@@ -439,11 +456,20 @@ struct ShotFilmstrip: View {
 struct TimingModePicker: View {
     let current: ShotTimingMode?
     let allowDefault: Bool
+    /// When the picker is for a specific shot, its measured capture rate +
+    /// the project frame rate enrich the As Shot items with the effective
+    /// frames-per-still at that output rate (23.976-aware, not assumed 24).
+    let captureFPS: Double?
+    let outputRate: FrameRate?
     let onPick: (ShotTimingMode?) -> Void
 
-    init(current: ShotTimingMode?, allowDefault: Bool, onPick: @escaping (ShotTimingMode?) -> Void) {
+    init(current: ShotTimingMode?, allowDefault: Bool,
+         captureFPS: Double? = nil, outputRate: FrameRate? = nil,
+         onPick: @escaping (ShotTimingMode?) -> Void) {
         self.current = current
         self.allowDefault = allowDefault
+        self.captureFPS = captureFPS
+        self.outputRate = outputRate
         self.onPick = onPick
     }
 
@@ -460,9 +486,9 @@ struct TimingModePicker: View {
             }
         }
         Section("As Shot") {
-            item(label: "Real time", mode: .asShot(rate: 1.0), checked: current == .asShot(rate: 1.0))
-            item(label: "Half speed", mode: .asShot(rate: 0.5), checked: current == .asShot(rate: 0.5))
-            item(label: "Double speed", mode: .asShot(rate: 2.0), checked: current == .asShot(rate: 2.0))
+            item(label: asShotLabel("Real time", speed: 1.0), mode: .asShot(rate: 1.0), checked: current == .asShot(rate: 1.0))
+            item(label: asShotLabel("Half speed", speed: 0.5), mode: .asShot(rate: 0.5), checked: current == .asShot(rate: 0.5))
+            item(label: asShotLabel("Double speed", speed: 2.0), mode: .asShot(rate: 2.0), checked: current == .asShot(rate: 2.0))
         }
         Section("Frame Skip") {
             ForEach([2, 3, 4], id: \.self) { n in
@@ -491,6 +517,12 @@ struct TimingModePicker: View {
         case 3: return "3rd"
         default: return "\(n)th"
         }
+    }
+
+    private func asShotLabel(_ base: String, speed: Double) -> String {
+        guard let captureFPS, captureFPS > 0, let outputRate else { return base }
+        let framesPerStill = outputRate.fps / (captureFPS * speed)
+        return String(format: "%@ (about %.1f frames/still at %@)", base, framesPerStill, outputRate.rawValue)
     }
 }
 

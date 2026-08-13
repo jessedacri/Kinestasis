@@ -247,6 +247,26 @@ public struct BurstShot: Codable, Sendable, Identifiable {
         guard let first = frames.first, let last = frames.last else { return 0 }
         return last.captureTime - first.captureTime
     }
+
+    /// Approximate burst rate at the shutter press: median of the first
+    /// ten stills' intervals, because the head is where cameras hold their
+    /// set rate — buffer-fill slowdown skews everything after.
+    public var approxCaptureFPS: Double? {
+        let times = frames.prefix(10).map(\.captureTime)
+        guard times.count > 1 else { return nil }
+        let intervals = zip(times.dropFirst(), times).map(-).filter { $0 > 0 }
+        guard !intervals.isEmpty else { return nil }
+        let median = intervals.sorted()[intervals.count / 2]
+        return 1.0 / median
+    }
+
+    /// "~8 fps" / "~7.5 fps", or nil when there is nothing to measure.
+    public var approxCaptureFPSLabel: String? {
+        guard let fps = approxCaptureFPS else { return nil }
+        let rounded = (fps * 10).rounded() / 10
+        let isWhole = rounded.truncatingRemainder(dividingBy: 1) == 0
+        return String(format: isWhole ? "~%.0f fps" : "~%.1f fps", rounded)
+    }
 }
 
 /// Project-wide burst defaults, adjustable in the UI.

@@ -230,4 +230,47 @@ final class BurstShotTests: XCTestCase {
         XCTAssertEqual(events.count, 2)
         XCTAssertEqual(ShotTimingEngine.totalFrames(events), 6)
     }
+
+    // MARK: - Approx capture fps
+
+    func testApproxCaptureFPSConsistentBurst() {
+        let shot = BurstShot(name: "S", frames: (0..<20).map { frame(Double($0) * 0.1) })
+        XCTAssertEqual(shot.approxCaptureFPS ?? 0, 10.0, accuracy: 0.01)
+        XCTAssertEqual(shot.approxCaptureFPSLabel, "~10 fps")
+    }
+
+    func testApproxCaptureFPSIgnoresBufferSlowdown() {
+        // Fuji-style: 8 fps for the first 12 stills, then the buffer fills
+        // and the tail crawls at 2 fps. The readout reflects the set rate.
+        var t = 0.0
+        var times: [Double] = []
+        for i in 0..<24 {
+            times.append(t)
+            t += i < 12 ? 0.125 : 0.5
+        }
+        let shot = BurstShot(name: "S", frames: times.map { frame($0) })
+        XCTAssertEqual(shot.approxCaptureFPS ?? 0, 8.0, accuracy: 0.01)
+        XCTAssertEqual(shot.approxCaptureFPSLabel, "~8 fps")
+    }
+
+    func testApproxCaptureFPSFromSpreadWholeSecondTimestamps() {
+        // X-Pro2-style whole-second EXIF after spreadEqualTimestamps: 8
+        // stills per second become synthetic 0.125s intervals.
+        let raw = (0..<16).map { frame(Double($0 / 8)) }
+        let spread = BurstGrouper.spreadEqualTimestamps(raw)
+        let shot = BurstShot(name: "S", frames: spread)
+        XCTAssertEqual(shot.approxCaptureFPS ?? 0, 8.0, accuracy: 0.01)
+    }
+
+    func testApproxCaptureFPSFractionalLabel() {
+        let shot = BurstShot(name: "S", frames: (0..<8).map { frame(Double($0) / 7.5) })
+        XCTAssertEqual(shot.approxCaptureFPSLabel, "~7.5 fps")
+    }
+
+    func testApproxCaptureFPSDegenerateShots() {
+        XCTAssertNil(BurstShot(name: "S", frames: [frame(0)]).approxCaptureFPS)
+        XCTAssertNil(BurstShot(name: "S", frames: []).approxCaptureFPS)
+        // Identical timestamps that were never spread: no usable interval.
+        XCTAssertNil(BurstShot(name: "S", frames: [frame(1), frame(1), frame(1)]).approxCaptureFPS)
+    }
 }

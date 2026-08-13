@@ -432,11 +432,18 @@ private struct ShotCard: View {
             )
             .opacity(shot.includeInExport ? 1 : 0.45)
 
-            HStack(spacing: 6) {
-                Text(shot.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .opacity(shot.includeInExport ? 1 : 0.5)
+            HStack(alignment: .top, spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(shot.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    if let fps = shot.approxCaptureFPSLabel {
+                        Text("\(fps) capture")
+                            .font(KineTheme.monoSmall)
+                            .foregroundStyle(KineTheme.textMuted)
+                    }
+                }
+                .opacity(shot.includeInExport ? 1 : 0.5)
                 Spacer(minLength: 0)
                 Text(statsLine)
                     .font(KineTheme.monoSmall)
@@ -450,13 +457,19 @@ private struct ShotCard: View {
         .onAppear { workspace.scheduleShotThumbnails(for: shot) }
         .contextMenu {
             Menu("Timing") {
-                TimingModePicker(current: shot.timingOverride, allowDefault: true) { mode in
+                TimingModePicker(current: shot.timingOverride, allowDefault: true,
+                                 captureFPS: shot.approxCaptureFPS, outputRate: rate) { mode in
                     workspace.setShotTiming(mode, for: shot.id)
                 }
             }
             Button("Copy Grade") { workspace.copyGrade(from: shot.id) }
             Button("Paste Grade") { workspace.pasteGrade(to: shot.id) }
                 .disabled(workspace.copiedShotGrade == nil)
+            if shot.hasRawJpegPairs {
+                Button(shot.useJpegSource ? "Use RAW Source" : "Use JPEG Source") {
+                    workspace.setUseJpegSource(!shot.useJpegSource, for: shot.id)
+                }
+            }
             Button("Export Shot…") { workspace.beginShotExport([shot.id]) }
             Divider()
             Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
