@@ -16,6 +16,16 @@ build + launch locally for Jesse, he says when to cut. 122 tests
 `/Volumes/BLANK 2T/XPro2 Cincinnati`). The main user actively tests and
 sends excellent logs (`kinestasis-logs-from-user/`).
 
+**Field diagnostics (new):** Kinestasis menu > Record Diagnostics, or
+`--diagnostics`, writes one plain-text file to ~/Documents/Kinestasis
+Diagnostics: stalls with the app's activity at the time, decode queue
+depth, RAM and disk cache hit rates, slow decodes, tier changes. Content
+is timing, counts, and basenames only, so a user can send it without
+sending their pictures. `KineDiagnostics` (KineCore) costs one Bool read
+when off; messages are autoclosures, counters aggregate between snapshots.
+This exists because the main user pinwheels while scrubbing and this
+machine has never reproduced it.
+
 **Debug rig (use it):** `Kinestasis --import <folder>` replays the
 drag-a-folder flow; add `--develop` to auto-enter Develop on the biggest
 burst and play. A watchdog prints `[lag] main thread stalled Nms + pool
@@ -38,7 +48,8 @@ incl. Hold on This Still (frames + ease in/out + then-skip). M marks stills
 as delivery selects. Exits: batch export sheet (codec matrix, stills
 selections with originals/RAW, fcpxml, remembers last-used, never
 overwrites silently), per-shot GIF export (cadence-true delays, boomerang
-toggle), drag the player frame out as a full-res graded JPEG (file
+toggle in the transport that previews the exact loop the file will play),
+drag the player frame out as a full-res graded JPEG (file
 promise). **Assemble** — the inherited Preem timeline; shots drag from the
 bin straight onto it and play/export with zero pre-render.
 
@@ -95,6 +106,22 @@ and encoder as `burstSkip`.
   High-frequency transport state stays on `WorkspaceModel.ShotTransport`
   (its own ObservableObject), never `@Published` on the workspace, or the
   whole grid re-renders at 24 Hz. `previewVersion` bumps are coalesced.
+- **Core Image rounds a scaled extent OUTWARD.** Scaling 4240x2832 (A7S III)
+  to 960 wide gives 641.207 rows, and CI reports the extent as 642 - one
+  row the image covers a fifth of. Rendered, that row has partial alpha,
+  and ImageIO dithered it into a line of static across the top of every
+  GIF the main user made. Aspects that divide evenly (X-Pro2 6000x4000 to
+  960x640) never show it, which is why it never reproduced here.
+  `ShotGradeRenderer.downscale` crops to `extent.applying(transform)
+  .containedIntegral` - the pixels the image actually fills. Cropping to
+  the extent CI reports is a no-op, because it has already rounded.
+  Any new scale-then-render path needs the same crop.
+- **Boomerang lives in `KineCore.BoomerangLoop`**, read by both the player
+  transport and `GIFExporter`. The return pass skips the first and last
+  STILL, not the first and last frame, and a ramp holds one still across
+  several schedule events - so the ends are runs to measure, not single
+  events. Change the loop shape in one place only, or the preview stops
+  being a preview.
 - **Export ≡ playback**: grain/wobble animate per output frame in BOTH
   `BurstShotExporter` (per-frame samples when texture is active) and
   `ShotFrameSource`. If you touch one, touch the other.
