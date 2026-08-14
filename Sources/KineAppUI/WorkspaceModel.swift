@@ -4175,7 +4175,16 @@ public final class WorkspaceModel: ObservableObject {
 
     private func updatePrimeProgress() {
         if primeQueue.isEmpty {
-            previewPrimeProgress = nil
+            // Hold the bar until the in-flight tail lands too - the
+            // machine is not actually idle the moment the queue drains.
+            if previewActiveCount == 0 || primeTotal == 0 {
+                previewPrimeProgress = nil
+            } else {
+                previewPrimeProgress = (primeTotal - previewActiveCount, primeTotal)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.updatePrimeProgress()
+                }
+            }
             return
         }
         guard !primeProgressPublishScheduled else { return }
@@ -4232,23 +4241,26 @@ public final class WorkspaceModel: ObservableObject {
         while previewActiveCount < previewMaxConcurrent,
               !previewPending.isEmpty || (primeAllowed && !primeQueue.isEmpty) {
             let url: URL
+            let isPrime: Bool
             if !previewPending.isEmpty {
                 url = previewPending.removeLast()
                 previewPendingSet.remove(url)
+                isPrime = false
             } else {
                 url = primeQueue.removeLast()
                 updatePrimeProgress()
+                isPrime = true
             }
             if let entry = shotFrameCache[url], entry.epoch == epoch { continue }
             guard !shotFramesInFlight.contains(url) else { continue }
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
             let hasAnyFrame = shotFrameCache[url] != nil
-            // Utility, not userInitiated: 24MP develops at interactive
-            // priority visibly hitched everything else on the machine
-            // during first-loop priming. The interim frame keeps the UI
-            // responsive while develops trail in.
-            Task.detached(priority: .utility) {
+            // Priming runs at .background - the one QoS class macOS
+            // actively starves in favor of whatever the user is doing in
+            // other apps. Direct requests (skim, playback lookahead) get
+            // .utility so the app itself stays responsive.
+            Task.detached(priority: isPrime ? .background : .utility) {
                 // High tier on a cold frame: put the instant embedded
                 // preview on screen first, then let the real develop
                 // replace it - scrubbing never shows a hole while a
@@ -4658,7 +4670,7 @@ public final class WorkspaceModel: ObservableObject {
     /// filmstrips arriving without soaking every core.
     private var thumbPending: [BurstShot] = []
     private var thumbActiveCount = 0
-    private static let thumbMaxConcurrent = 3
+    private static let thumbMaxConcurrent = 2
 
     public func scheduleShotThumbnails(for shot: BurstShot) {
         guard shotThumbnails[shot.id] == nil, !shotThumbsInFlight.contains(shot.id) else { return }
@@ -4679,7 +4691,7 @@ public final class WorkspaceModel: ObservableObject {
                     : Int((Double(i) / Double(count - 1) * Double(frames.count - 1)).rounded())
                 return snapshot.sourceURL(for: frames[idx])
             }
-            Task.detached(priority: .utility) {
+            Task.detached(priority: .background) {
                 let images = urls.compactMap { StillDecoder.preview(url: $0, maxPixel: 200) }
                 await MainActor.run {
                     self.shotThumbnails[shotID] = images
