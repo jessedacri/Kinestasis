@@ -4284,8 +4284,16 @@ public final class WorkspaceModel: ObservableObject {
                 isPrime = true
                 primeInFlight += 1
             }
-            if let entry = shotFrameCache[url], entry.epoch == epoch { continue }
-            guard !shotFramesInFlight.contains(url) else { continue }
+            // Skip paths must release the prime slot they just claimed -
+            // leaking two of these froze priming mid-run (stuck at 75/177).
+            if let entry = shotFrameCache[url], entry.epoch == epoch {
+                if isPrime { primeInFlight -= 1; maybeFinishGenerating() }
+                continue
+            }
+            guard !shotFramesInFlight.contains(url) else {
+                if isPrime { primeInFlight -= 1 }
+                continue
+            }
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
             let hasAnyFrame = shotFrameCache[url] != nil
