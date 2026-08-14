@@ -4195,7 +4195,10 @@ public final class WorkspaceModel: ObservableObject {
     private var previewPending: [URL] = []
     private var previewPendingSet: Set<URL> = []
     private var previewActiveCount = 0
-    private static let previewMaxConcurrent = 4
+    /// Full 24MP develops slam the GPU and memory bus; two at a time
+    /// keeps the rest of the machine (and the app's own grade renders)
+    /// breathing. Embedded-preview tiers stay at four.
+    private var previewMaxConcurrent: Int { previewQuality.usesFullDecode ? 2 : 4 }
     private static let previewPendingCap = 512
 
     /// Decode a preview frame off-main if it isn't cached; bumps
@@ -4216,7 +4219,12 @@ public final class WorkspaceModel: ObservableObject {
         let maxPixel = shotFramePixels
         let fullDecode = previewQuality.usesFullDecode
         let epoch = cacheEpoch
-        while previewActiveCount < Self.previewMaxConcurrent, !previewPending.isEmpty || !primeQueue.isEmpty {
+        // Priming yields completely while the transport runs: background
+        // develops during playback were what stalled the whole machine on
+        // first loops. It resumes the moment playback stops.
+        let primeAllowed = shotPlayRate == 0
+        while previewActiveCount < previewMaxConcurrent,
+              !previewPending.isEmpty || (primeAllowed && !primeQueue.isEmpty) {
             let url: URL
             if !previewPending.isEmpty {
                 url = previewPending.removeLast()
@@ -4230,7 +4238,11 @@ public final class WorkspaceModel: ObservableObject {
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
             let hasAnyFrame = shotFrameCache[url] != nil
-            Task.detached(priority: .userInitiated) {
+            // Utility, not userInitiated: 24MP develops at interactive
+            // priority visibly hitched everything else on the machine
+            // during first-loop priming. The interim frame keeps the UI
+            // responsive while develops trail in.
+            Task.detached(priority: .utility) {
                 // High tier on a cold frame: put the instant embedded
                 // preview on screen first, then let the real develop
                 // replace it - scrubbing never shows a hole while a
@@ -4552,6 +4564,7 @@ public final class WorkspaceModel: ObservableObject {
         shotPlayRate = 0
         shotPlayTimer?.invalidate()
         shotPlayTimer = nil
+        pumpPreviewDecodes()   // priming resumes now that playback yields
     }
 
     public func shotStepFrames(_ n: Int64) {
@@ -4605,6 +4618,19 @@ public final class WorkspaceModel: ObservableObject {
         if next >= total { next = 0 }
         if next < 0 { next = total - 1 }
         shotPlayheadFrame = next
+        // Lookahead: queue the stills about to hit the screen, so cold
+        // first loops decode exactly what playback needs next instead of
+        // whatever priming had in hand.
+        if let shot = previewShot {
+            let frames = playbackFrames(for: shot)
+            for ahead in stride(from: next + 4, through: next + 24, by: 4) {
+                let f = ahead >= total ? ahead - total : ahead
+                if let event = ShotTimingEngine.event(at: f, in: schedule),
+                   frames.indices.contains(event.frameIndex) {
+                    requestPreviewFrame(shot.sourceURL(for: frames[event.frameIndex]))
+                }
+            }
+        }
     }
 
     /// The still on screen at the current shot playhead, honoring the

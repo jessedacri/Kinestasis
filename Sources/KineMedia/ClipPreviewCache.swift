@@ -72,8 +72,14 @@ public final class ClipPreviewCache {
         }
     }
 
+    /// Clips whose generation failed. Without this, every UI pass retried
+    /// the same failing clip forever - an odd-height video whose frames
+    /// cannot convert (VT/IOSurface err -536870206) burned CPU until the
+    /// app hung (user report, 0.1.4).
+    private var failedThumbs: Set<ClipID> = []
+
     public func ensureThumbnails(clipID: ClipID, url: URL, count: Int = 24, heightPx: Int = 80) {
-        if thumbs[clipID] != nil || inFlightThumbs.contains(clipID) { return }
+        if thumbs[clipID] != nil || inFlightThumbs.contains(clipID) || failedThumbs.contains(clipID) { return }
         inFlightThumbs.insert(clipID)
         Task.detached(priority: .utility) {
             let result = await Self.generateThumbnails(url: url, count: count, heightPx: heightPx)
@@ -81,9 +87,11 @@ public final class ClipPreviewCache {
                 self.inFlightThumbs.remove(clipID)
                 if let result {
                     self.thumbs[clipID] = result
-                    self.version &+= 1
-                    self.onChange?()
+                } else {
+                    self.failedThumbs.insert(clipID)
                 }
+                self.version &+= 1
+                self.onChange?()
             }
         }
     }
@@ -168,7 +176,9 @@ public final class ClipPreviewCache {
 
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 0, height: CGFloat(heightPx) * 2)
+        // Even dimensions only: odd-height outputs hit a VT/IOSurface
+        // conversion bug on some sources ('422f' 202x135 -> RGBA 202x136).
+        generator.maximumSize = CGSize(width: 0, height: CGFloat((heightPx * 2) & ~1))
         // Loose tolerance — quality-of-life over frame-exact accuracy
         // when scrubbing a timeline strip.
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.25, preferredTimescale: 600)

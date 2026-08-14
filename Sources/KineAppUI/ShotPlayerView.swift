@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AppKit
 import KineCore
 import KineMedia
@@ -15,8 +16,7 @@ struct ShotPlayerView: View {
     var body: some View {
         let shot = workspace.previewShot
         VStack(spacing: 0) {
-            PlayerFrameHost(workspace: workspace, transport: workspace.shotTransport,
-                            previews: workspace.previewTicker)
+            PlayerFrameHost(workspace: workspace, transport: workspace.shotTransport)
                 .frame(minHeight: large ? 280 : 160, idealHeight: large ? nil : 240,
                        maxHeight: large ? .infinity : nil)
                 .contentShape(Rectangle())
@@ -157,35 +157,38 @@ struct FrameLayerView: NSViewRepresentable {
 }
 
 
-/// The only views that observe the shot transport at playback rate (the
-/// grid footgun): each is a leaf whose relayout cannot ripple outward.
+/// The playback frame pipeline lives OUTSIDE SwiftUI: a render pump
+/// subscribes to the transport and preview ticker directly and writes
+/// finished frames straight into a CALayer. A playback tick therefore
+/// touches zero SwiftUI state - per-tick @State swaps were dragging the
+/// whole window through AppKit layout at frame rate no matter how small
+/// the observing view was.
 private struct PlayerFrameHost: View {
     @ObservedObject var workspace: WorkspaceModel
-    @ObservedObject var transport: WorkspaceModel.ShotTransport
-    @ObservedObject var previews: WorkspaceModel.PreviewTicker
-
-    @State private var playerImage: CGImage?
-    @State private var renderGeneration = 0
-    @State private var renderInFlight = false
-    @State private var renderQueued = false
-    /// One renderer (one CIContext) for the app's player. A per-struct
-    /// renderer re-inited on every parent re-evaluation leaked a Metal
-    /// context per slider tick and ground the session down over time.
-    private static let renderer = ShotGradeRenderer()
+    let transport: WorkspaceModel.ShotTransport
 
     var body: some View {
-        let shot = workspace.previewShot
         ZStack {
             Color.black
-            FrameLayerView(image: playerImage)
-            if playerImage == nil, shot != nil {
-                ProgressView().controlSize(.small)
-            }
-            if transport.playRate != 0 {
+            PlayerFrameSurface(workspace: workspace)
+            ShuttleBadge(transport: transport)
+        }
+    }
+}
+
+/// Observes ONLY the play rate (via onReceive + removeDuplicates, no
+/// ObservedObject - that would tick per frame).
+private struct ShuttleBadge: View {
+    let transport: WorkspaceModel.ShotTransport
+    @State private var rate: Double = 0
+
+    var body: some View {
+        Group {
+            if rate != 0 {
                 VStack {
                     HStack {
                         Spacer()
-                        Text(shuttleLabel)
+                        Text((rate < 0 ? "\u{25C0} " : "\u{25B6} ") + (abs(rate) == 1 ? "1x" : String(format: "%gx", abs(rate))))
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -198,54 +201,131 @@ private struct PlayerFrameHost: View {
                 }
             }
         }
-        .onAppear { rerender() }
-        .onReceive(transport.$playheadFrame) { _ in rerender() }
-        .onReceive(transport.$playRate) { _ in rerender() }
-        .onChange(of: previews.version) { _, _ in rerender() }
-        .onChange(of: workspace.skimShotID) { _, _ in rerender() }
-        .onChange(of: workspace.selectedShotID) { _, _ in rerender() }
-        .onChange(of: shot?.grade) { _, _ in rerender() }
-        .onChange(of: shot?.useJpegSource) { _, _ in rerender() }
+        .onReceive(transport.$playRate.removeDuplicates()) { rate = $0 }
+    }
+}
+
+private struct PlayerFrameSurface: NSViewRepresentable {
+    let workspace: WorkspaceModel
+
+    func makeCoordinator() -> RenderPump { RenderPump(workspace: workspace) }
+
+    func makeNSView(context: Context) -> FrameSurfaceView {
+        let view = FrameSurfaceView()
+        context.coordinator.attach(view)
+        return view
     }
 
-    private var shuttleLabel: String {
-        let r = transport.playRate
-        return (r < 0 ? "\u{25C0} " : "\u{25B6} ") + (abs(r) == 1 ? "1x" : String(format: "%gx", abs(r)))
+    func updateNSView(_ view: FrameSurfaceView, context: Context) {}
+}
+
+/// Layer-backed frame display: image swaps only touch CALayer.contents,
+/// never layout, and never animate implicitly.
+final class FrameSurfaceView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.contentsGravity = .resizeAspect
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.minificationFilter = .trilinear
+        layer?.magnificationFilter = .linear
     }
 
-    /// Live frame: cached base (full develop when primed) + grade applied
-    /// on top. Export is the exact RAW develop.
-    private func rerender() {
+    required init?(coder: NSCoder) { nil }
+
+    func show(_ image: CGImage?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.contents = image
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        layer?.contentsScale = window?.backingScaleFactor ?? 2
+    }
+}
+
+/// Drives the surface from Combine subscriptions; one grade render in
+/// flight, latest-wins. One shared renderer (one CIContext) app-wide.
+@MainActor final class RenderPump {
+    private let workspace: WorkspaceModel
+    private weak var surface: FrameSurfaceView?
+    private var subs: Set<AnyCancellable> = []
+    private var inFlight = false
+    private var queued = false
+    private var generation = 0
+    private var lastShownURL: URL?
+    private static let renderer = ShotGradeRenderer()
+
+    nonisolated init(workspace: WorkspaceModel) {
+        self.workspace = workspace
+        Task { @MainActor in self.subscribe() }
+    }
+
+    private func subscribe() {
+        // Async main delivery: @Published emits on willSet, so read the
+        // model one runloop later, after the value actually lands.
+        workspace.shotTransport.$playheadFrame
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &subs)
+        workspace.previewTicker.$version
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &subs)
+        workspace.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &subs)
+    }
+
+    func attach(_ view: FrameSurfaceView) {
+        surface = view
+        render()
+    }
+
+    private func render() {
         guard let shot = workspace.previewShot,
-              let url = workspace.currentShotFrameURL() else { playerImage = nil; return }
+              let url = workspace.currentShotFrameURL() else {
+            lastShownURL = nil
+            surface?.show(nil)
+            return
+        }
         if workspace.shotPlayRate == 0 { workspace.scheduleRefinedFrame() }
         workspace.requestPreviewFrame(url)
         guard let base = workspace.cachedRefinedFrame(url) ?? workspace.cachedPreviewFrame(url) else {
-            return   // previewVersion bump re-triggers when the decode lands
+            return   // ticker fires again when the decode lands
         }
         let grade = shot.grade
         let seed = workspace.shotPlayheadFrame
+        if grade.isIdentity, lastShownURL != url || seed == 0 {
+            // Ungraded: skip the CI hop entirely.
+            lastShownURL = url
+            surface?.show(base)
+            return
+        }
+        if inFlight {
+            queued = true
+            return
+        }
+        inFlight = true
+        generation += 1
+        let gen = generation
         let ev = ExposureWobble.evOffset(
             outputFrame: seed, fps: workspace.shotFrameRate.fps,
             intensity: grade.wobbleIntensity, rate: grade.wobbleRate)
-        // One render in flight at a time: scrubbing used to pile up
-        // stale full-size CI renders until every keystroke waited in
-        // line behind them.
-        if renderInFlight {
-            renderQueued = true
-            return
-        }
-        renderInFlight = true
-        renderGeneration += 1
-        let generation = renderGeneration
         Task.detached(priority: .userInitiated) {
             let image = Self.renderer.gradePreview(base, grade: grade, evOffset: ev, grainSeed: seed) ?? base
             await MainActor.run {
-                self.renderInFlight = false
-                if generation == self.renderGeneration { self.playerImage = image }
-                if self.renderQueued {
-                    self.renderQueued = false
-                    self.rerender()
+                self.inFlight = false
+                if gen == self.generation {
+                    self.lastShownURL = url
+                    self.surface?.show(image)
+                }
+                if self.queued {
+                    self.queued = false
+                    self.render()
                 }
             }
         }
