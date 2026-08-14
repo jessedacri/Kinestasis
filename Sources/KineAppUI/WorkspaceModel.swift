@@ -4197,8 +4197,14 @@ public final class WorkspaceModel: ObservableObject {
     private var previewActiveCount = 0
     /// Full 24MP develops slam the GPU and memory bus; two at a time
     /// keeps the rest of the machine (and the app's own grade renders)
-    /// breathing. Embedded-preview tiers stay at four.
-    private var previewMaxConcurrent: Int { previewQuality.usesFullDecode ? 2 : 4 }
+    /// breathing - and just ONE while the transport is actually running.
+    /// Embedded-preview tiers stay at four.
+    private var previewMaxConcurrent: Int {
+        if previewQuality.usesFullDecode {
+            return shotPlayRate != 0 ? 1 : 2
+        }
+        return 4
+    }
     private static let previewPendingCap = 512
 
     /// Decode a preview frame off-main if it isn't cached; bumps
@@ -4326,11 +4332,14 @@ public final class WorkspaceModel: ObservableObject {
         }
     }
 
-    /// Warm the cache for a whole shot (first ~160 frames) so skim and
-    /// playback are instant. Enqueued in reverse: the decode pool drains
-    /// newest-first, so this makes priming run from frame 0 forward.
+    /// Warm the cache for a shot so skim and playback start instantly.
+    /// Enqueued in reverse: the decode pool drains newest-first, so this
+    /// makes priming run from frame 0 forward. On the full-develop tier
+    /// only a small head window queues here - the playback lookahead and
+    /// the background primer cover the rest without flooding the pool.
     public func prefetchPreviewFrames(for shot: BurstShot) {
-        for frame in shot.frames.prefix(160).reversed() {
+        let window = previewQuality.usesFullDecode ? 24 : 160
+        for frame in shot.frames.prefix(window).reversed() {
             requestPreviewFrame(shot.sourceURL(for: frame))
         }
     }
