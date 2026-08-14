@@ -56,18 +56,29 @@ public final class ClipPreviewCache {
         (waveforms, thumbs)
     }
 
+    private var waveformQueue: [(ClipID, URL, Int)] = []
+    private var waveformJobRunning = false
+
     public func ensureWaveform(clipID: ClipID, url: URL, buckets: Int = 2000) {
         if waveforms[clipID] != nil || inFlightWaveforms.contains(clipID) { return }
         inFlightWaveforms.insert(clipID)
+        waveformQueue.append((clipID, url, buckets))
+        pumpWaveformQueue()
+    }
+
+    private func pumpWaveformQueue() {
+        guard !waveformJobRunning, !waveformQueue.isEmpty else { return }
+        waveformJobRunning = true
+        let (clipID, url, buckets) = waveformQueue.removeFirst()
         Task.detached(priority: .utility) {
             let result = Self.generateWaveform(url: url, buckets: buckets)
             await MainActor.run {
                 self.inFlightWaveforms.remove(clipID)
-                if let result {
-                    self.waveforms[clipID] = result
-                    self.version &+= 1
-                    self.onChange?()
-                }
+                if let result { self.waveforms[clipID] = result }
+                self.version &+= 1
+                self.onChange?()
+                self.waveformJobRunning = false
+                self.pumpWaveformQueue()
             }
         }
     }
@@ -78,9 +89,25 @@ public final class ClipPreviewCache {
     /// app hung (user report, 0.1.4).
     private var failedThumbs: Set<ClipID> = []
 
+    /// Strictly one clip generating at a time. A folder with dozens of
+    /// videos used to launch every thumbnail+waveform job at once - each
+    /// spins VideoToolbox sessions, and the shared VTDecoderXPCService
+    /// ballooned to thousands of threads, hitching video playback in
+    /// EVERY app on the machine (Safari included).
+    private var thumbQueue: [(ClipID, URL, Int, Int)] = []
+    private var thumbJobRunning = false
+
     public func ensureThumbnails(clipID: ClipID, url: URL, count: Int = 24, heightPx: Int = 80) {
         if thumbs[clipID] != nil || inFlightThumbs.contains(clipID) || failedThumbs.contains(clipID) { return }
         inFlightThumbs.insert(clipID)
+        thumbQueue.append((clipID, url, count, heightPx))
+        pumpThumbQueue()
+    }
+
+    private func pumpThumbQueue() {
+        guard !thumbJobRunning, !thumbQueue.isEmpty else { return }
+        thumbJobRunning = true
+        let (clipID, url, count, heightPx) = thumbQueue.removeFirst()
         Task.detached(priority: .utility) {
             let result = await Self.generateThumbnails(url: url, count: count, heightPx: heightPx)
             await MainActor.run {
@@ -92,6 +119,8 @@ public final class ClipPreviewCache {
                 }
                 self.version &+= 1
                 self.onChange?()
+                self.thumbJobRunning = false
+                self.pumpThumbQueue()
             }
         }
     }

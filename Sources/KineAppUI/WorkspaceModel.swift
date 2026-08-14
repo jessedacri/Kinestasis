@@ -4311,15 +4311,10 @@ public final class WorkspaceModel: ObservableObject {
                         self.storeInterimFrame(url: url, image: quick)
                     }
                 }
-                // Prime reads run under the disk-IO throttle (the Time
-                // Machine class): archive folders live on external drives
-                // and un-throttled reads starve other apps' IO.
-                if isPrime { setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE) }
                 let image = fullDecode
                     ? StillDecoder.decode(url: url, maxPixel: maxPixel)
                     : StillDecoder.preview(url: url, maxPixel: maxPixel)
                 if let image { PreviewDiskCache.store(image, url: url, maxPixel: maxPixel) }
-                if isPrime { setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_DEFAULT) }
                 if isPrime {
                     // Light pacing on first-time develops; cached folders
                     // skip this entirely.
