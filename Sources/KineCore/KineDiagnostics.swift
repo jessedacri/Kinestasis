@@ -30,10 +30,13 @@ public enum KineDiagnostics {
     public nonisolated(unsafe) private(set) static var isRecording = false
     public nonisolated(unsafe) private(set) static var currentLogURL: URL?
 
-    /// Where recordings land. Visible in the Finder without hunting.
+    /// Where recordings land. Not Documents: macOS gates that behind a
+    /// consent prompt, and a remote user who dismisses it produces no
+    /// report at all. Library/Logs needs no permission, and stopping a
+    /// recording reveals the file in the Finder anyway.
     public static var logDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/Kinestasis Diagnostics", isDirectory: true)
+            .appendingPathComponent("Library/Logs/Kinestasis", isDirectory: true)
     }
 
     /// Begins a recording, returning the file being written. `context`

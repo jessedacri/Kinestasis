@@ -254,7 +254,7 @@ public struct KineRootView: View {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
                 workspace.presentNotice(
                     title: "Diagnostics saved",
-                    message: "Saved \(url.lastPathComponent) to your Documents folder, in Kinestasis Diagnostics. It is now selected in the Finder. Send that file back.")
+                    message: "Saved \(url.lastPathComponent). It is selected in the Finder now. Send that file back.")
             }
         } else if workspace.startDiagnosticsRecording() != nil {
             workspace.presentNotice(
@@ -263,7 +263,7 @@ public struct KineRootView: View {
         } else {
             workspace.presentNotice(
                 title: "Could not start recording",
-                message: "Kinestasis could not create a log file in your Documents folder.")
+                message: "Kinestasis could not create a log file.")
         }
     }
 
