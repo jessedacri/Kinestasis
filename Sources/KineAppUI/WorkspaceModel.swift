@@ -4148,6 +4148,20 @@ public final class WorkspaceModel: ObservableObject {
         @Published public internal(set) var value: (done: Int, total: Int)?
     }
     public let primeProgress = PrimeProgress()
+
+    /// True from import until previews and thumbnails are fully built.
+    /// The grid shows static skeleton cards meanwhile - zero image
+    /// compositing, zero ticker traffic, one reveal at the end. As
+    /// static as Premiere's import.
+    @Published public private(set) var generatingPreviews = false
+
+    private func maybeFinishGenerating() {
+        guard generatingPreviews,
+              primeQueue.isEmpty, primeInFlight == 0, previewActiveCount == 0,
+              thumbPending.isEmpty, thumbActiveCount == 0 else { return }
+        generatingPreviews = false
+        previewVersion += 1
+    }
     public internal(set) var previewPrimeProgress: (done: Int, total: Int)? {
         get { primeProgress.value }
         set { primeProgress.value = newValue }
@@ -4169,6 +4183,7 @@ public final class WorkspaceModel: ObservableObject {
             }
         }
         guard !urls.isEmpty else { return }
+        generatingPreviews = true
         primeQueue = urls.reversed()   // popped from the end = shot order
         primeTotal = urls.count
         updatePrimeProgress()
@@ -4178,6 +4193,8 @@ public final class WorkspaceModel: ObservableObject {
     public func cancelPreviewPriming() {
         primeQueue = []
         previewPrimeProgress = nil
+        generatingPreviews = false
+        previewVersion += 1
     }
 
     private var primeProgressPublishScheduled = false
@@ -4285,20 +4302,24 @@ public final class WorkspaceModel: ObservableObject {
                     return
                 }
                 let started = DispatchTime.now()
-                // High tier on a cold frame: put the instant embedded
-                // preview on screen first, then let the real develop
-                // replace it - scrubbing never shows a hole while a
-                // half-second RAW develop runs.
-                if fullDecode, !hasAnyFrame,
+                // High tier on a cold USER-FACING frame: instant embedded
+                // preview first, real develop replaces it. Prime frames
+                // skip this (nothing shows them).
+                if fullDecode, !hasAnyFrame, !isPrime,
                    let quick = StillDecoder.preview(url: url, maxPixel: 960) {
                     await MainActor.run {
                         self.storeInterimFrame(url: url, image: quick)
                     }
                 }
+                // Prime reads run under the disk-IO throttle (the Time
+                // Machine class): archive folders live on external drives
+                // and un-throttled reads starve other apps' IO.
+                if isPrime { setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE) }
                 let image = fullDecode
                     ? StillDecoder.decode(url: url, maxPixel: maxPixel)
                     : StillDecoder.preview(url: url, maxPixel: maxPixel)
                 if let image { PreviewDiskCache.store(image, url: url, maxPixel: maxPixel) }
+                if isPrime { setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_DEFAULT) }
                 if isPrime {
                     // Light pacing on first-time develops; cached folders
                     // skip this entirely.
@@ -4739,11 +4760,12 @@ public final class WorkspaceModel: ObservableObject {
                     self.shotThumbnails[shotID] = images
                     self.shotThumbsInFlight.remove(shotID)
                     self.thumbActiveCount -= 1
-                    self.bumpPreviewsCoalesced()
+                    if !self.generatingPreviews { self.bumpPreviewsCoalesced() }
                     self.pumpThumbnailQueue()
                     // Thumbnail phase draining is what unblocks priming.
                     if self.thumbPending.isEmpty, self.thumbActiveCount == 0 {
                         self.pumpPreviewDecodes()
+                        self.maybeFinishGenerating()
                     }
                 }
             }

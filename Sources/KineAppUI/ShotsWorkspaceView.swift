@@ -528,6 +528,22 @@ struct ShotCard: View {
     /// While skimming (or when selected + playing), show the live frame
     /// full-bleed; otherwise the filmstrip.
     @ViewBuilder private var stripOrSkimFrame: some View {
+        if workspace.generatingPreviews {
+            // Static skeleton while previews build: no images, no
+            // spinners (spinners animate = compositing) - the machine
+            // belongs to the generation pass and the user's other apps.
+            ZStack {
+                Rectangle().fill(Color.white.opacity(0.045))
+                Image(systemName: "photo.stack")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.white.opacity(0.14))
+            }
+        } else {
+            stripImages
+        }
+    }
+
+    @ViewBuilder private var stripImages: some View {
         let images = workspace.shotThumbnails[shot.id] ?? []
         let liveURL: URL? = hoverFraction.flatMap { skimURL(fraction: $0) }
         if let liveURL, let frame = workspace.cachedPreviewFrame(liveURL) {
