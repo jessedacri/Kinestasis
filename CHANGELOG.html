@@ -48,6 +48,25 @@
 
   <div class="release">
     <div class="release-head">
+      <span class="version">0.1.5</span>
+      <span class="date">Aug 13, 2026</span>
+    </div>
+    <ul>
+      <li><b>GIF export.</b> Right-click any shot. One frame per still with delays from the real cadence, ramps included, looping forever. 480, 640, or 960 px. Plays everywhere.</li>
+      <li><b>Drag frames out.</b> Drag the player frame into Finder, Messages, Mail, or an app icon and it lands as a full-resolution graded JPEG, not a thumbnail.</li>
+      <li><b>Previews build once, ever.</b> Generated previews are cached on disk. The second import of a folder, and every one after, is near-instant and silent.</li>
+      <li>While previews generate, the grid shows placeholders that fill in as shots finish, and the rest of your Mac stays responsive.</li>
+    </ul>
+    <ul class="fix">
+      <li>Importing a folder with videos could hitch video playback and typing across the whole machine, and one bad video could hang the app until force quit. Video processing now runs one clip at a time and bad clips are skipped.</li>
+      <li>The camera's in-camera RAW conversions no longer splice into their source burst as out-of-order frames; they go to Singles.</li>
+      <li>Keyboard and controls no longer slow down over a long session.</li>
+      <li>Preview generation could freeze partway through.</li>
+    </ul>
+  </div>
+
+  <div class="release">
+    <div class="release-head">
       <span class="version">0.1.4</span>
       <span class="date">Aug 13, 2026</span>
     </div>
