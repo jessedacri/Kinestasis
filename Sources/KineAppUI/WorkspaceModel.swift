@@ -4300,11 +4300,10 @@ public final class WorkspaceModel: ObservableObject {
                     : StillDecoder.preview(url: url, maxPixel: maxPixel)
                 if let image { PreviewDiskCache.store(image, url: url, maxPixel: maxPixel) }
                 if isPrime {
-                    // First-time develops pace themselves (30% duty) so a
-                    // cold folder primes briskly without owning the
-                    // memory bus. Cached folders skip this entirely.
+                    // Light pacing on first-time develops; cached folders
+                    // skip this entirely.
                     let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
-                    try? await Task.sleep(nanoseconds: min(elapsed / 3, 400_000_000))
+                    try? await Task.sleep(nanoseconds: min(elapsed / 6, 200_000_000))
                 }
                 await MainActor.run {
                     self.shotFramesInFlight.remove(url)
@@ -4327,7 +4326,7 @@ public final class WorkspaceModel: ObservableObject {
         }
         shotFrameCache[url] = (image, cacheEpoch - 1)
         shotFrameBytes += image.width * image.height * 4
-        bumpPreviewsCoalesced()
+        if url == currentShotFrameURL() { bumpPreviewsCoalesced() }
     }
 
     private func storePreviewFrame(url: URL, image: CGImage) {
@@ -4338,6 +4337,11 @@ public final class WorkspaceModel: ObservableObject {
         }
         shotFrameCache[url] = (image, cacheEpoch)
         shotFrameBytes += image.width * image.height * 4
+        // Redraw only when the landed frame is actually on screen.
+        // Bumping the ticker for every primed frame redrew the whole
+        // card grid at 7 Hz for the entire priming pass - a WindowServer
+        // compositing storm that hitched video playback in OTHER apps.
+        let visible = url == currentShotFrameURL()
         if shotFrameBytes > shotFrameByteBudget {
             // Never evict the shot being previewed: a looping burst that
             // evicts its own head re-decodes every frame every pass and
@@ -4360,7 +4364,7 @@ public final class WorkspaceModel: ObservableObject {
                 }
             }
         }
-        bumpPreviewsCoalesced()
+        if visible { bumpPreviewsCoalesced() }
     }
 
     /// Coalesce previewVersion bumps: while a prefetch is landing dozens of
