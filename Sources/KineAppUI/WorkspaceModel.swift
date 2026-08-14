@@ -333,6 +333,7 @@ public final class WorkspaceModel: ObservableObject {
         }
         WorkspaceModel.current = self
         startLagWatchdog()
+        Task.detached(priority: .background) { PreviewDiskCache.sweep() }
     }
 
     /// Prints when the main thread stops answering, with decode-pool
@@ -4112,7 +4113,14 @@ public final class WorkspaceModel: ObservableObject {
                   self.refinedFrame?.url != url else { return }
             let pixels = Self.refinePixels
             Task.detached(priority: .userInitiated) {
-                guard let image = StillDecoder.decode(url: url, maxPixel: pixels) else { return }
+                let image: CGImage?
+                if let cached = PreviewDiskCache.load(url: url, maxPixel: pixels) {
+                    image = cached
+                } else {
+                    image = StillDecoder.decode(url: url, maxPixel: pixels)
+                    if let image { PreviewDiskCache.store(image, url: url, maxPixel: pixels) }
+                }
+                guard let image else { return }
                 await MainActor.run {
                     guard generation == self.refineGeneration else { return }
                     self.refinedFrame = (url, image)
@@ -4242,9 +4250,8 @@ public final class WorkspaceModel: ObservableObject {
         // finish (three overlapping pipelines was the rough first minute),
         // and runs strictly one decode at a time.
         let primeAllowed = shotPlayRate == 0 && thumbPending.isEmpty && thumbActiveCount == 0
-            && primeInFlight == 0
         while previewActiveCount < previewMaxConcurrent,
-              !previewPending.isEmpty || (primeAllowed && !primeQueue.isEmpty && primeInFlight == 0) {
+              !previewPending.isEmpty || (primeAllowed && !primeQueue.isEmpty && primeInFlight < 2) {
             let url: URL
             let isPrime: Bool
             if !previewPending.isEmpty {
@@ -4262,12 +4269,21 @@ public final class WorkspaceModel: ObservableObject {
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
             let hasAnyFrame = shotFrameCache[url] != nil
-            // Priming runs at .background (macOS starves it for
-            // foreground work) AND at a 50% duty cycle - QoS cannot
-            // throttle memory bandwidth, so after each decode the prime
-            // slot sleeps as long as the decode took. Premiere-style
-            // politeness: the machine belongs to the user.
-            Task.detached(priority: isPrime ? .background : .utility) {
+            Task.detached(priority: .utility) {
+                // Disk cache first: a frame decodes ONCE per tier - ever.
+                // Cache hits are ~15ms JPEG reads and cost the machine
+                // nothing, which is what makes repeat imports, relaunch,
+                // and re-priming instant and quiet.
+                if let cached = PreviewDiskCache.load(url: url, maxPixel: maxPixel) {
+                    await MainActor.run {
+                        self.shotFramesInFlight.remove(url)
+                        self.previewActiveCount -= 1
+                        if isPrime { self.primeInFlight -= 1 }
+                        self.storePreviewFrame(url: url, image: cached)
+                        self.pumpPreviewDecodes()
+                    }
+                    return
+                }
                 let started = DispatchTime.now()
                 // High tier on a cold frame: put the instant embedded
                 // preview on screen first, then let the real develop
@@ -4282,9 +4298,13 @@ public final class WorkspaceModel: ObservableObject {
                 let image = fullDecode
                     ? StillDecoder.decode(url: url, maxPixel: maxPixel)
                     : StillDecoder.preview(url: url, maxPixel: maxPixel)
+                if let image { PreviewDiskCache.store(image, url: url, maxPixel: maxPixel) }
                 if isPrime {
+                    // First-time develops pace themselves (30% duty) so a
+                    // cold folder primes briskly without owning the
+                    // memory bus. Cached folders skip this entirely.
                     let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
-                    try? await Task.sleep(nanoseconds: min(elapsed, 1_500_000_000))
+                    try? await Task.sleep(nanoseconds: min(elapsed / 3, 400_000_000))
                 }
                 await MainActor.run {
                     self.shotFramesInFlight.remove(url)
@@ -4704,8 +4724,13 @@ public final class WorkspaceModel: ObservableObject {
                     : Int((Double(i) / Double(count - 1) * Double(frames.count - 1)).rounded())
                 return snapshot.sourceURL(for: frames[idx])
             }
-            Task.detached(priority: .background) {
-                let images = urls.compactMap { StillDecoder.preview(url: $0, maxPixel: 200) }
+            Task.detached(priority: .utility) {
+                let images = urls.compactMap { url -> CGImage? in
+                    if let cached = PreviewDiskCache.load(url: url, maxPixel: 200) { return cached }
+                    guard let img = StillDecoder.preview(url: url, maxPixel: 200) else { return nil }
+                    PreviewDiskCache.store(img, url: url, maxPixel: 200)
+                    return img
+                }
                 await MainActor.run {
                     self.shotThumbnails[shotID] = images
                     self.shotThumbsInFlight.remove(shotID)
