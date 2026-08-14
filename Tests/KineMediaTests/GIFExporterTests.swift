@@ -16,4 +16,17 @@ final class GIFExporterTests: XCTestCase {
         XCTAssertEqual(entries[1].delay, 5.0 / 24, accuracy: 1e-9, "merged run")
         XCTAssertEqual(entries[2].delay, 6.0 / 24, accuracy: 1e-9)
     }
+
+    func testBoomerangMirrorsInteriorOnly() {
+        let entries: [(index: Int, delay: Double)] = [(0, 0.1), (1, 0.2), (2, 0.3), (3, 0.4)]
+        let pingPong = GIFExporter.boomerangEntries(entries)
+        XCTAssertEqual(pingPong.map(\.index), [0, 1, 2, 3, 2, 1],
+                       "ends are not doubled, so the loop is seamless")
+        XCTAssertEqual(pingPong.map(\.delay), [0.1, 0.2, 0.3, 0.4, 0.3, 0.2])
+    }
+
+    func testBoomerangOfTinySequencesIsUnchanged() {
+        let two: [(index: Int, delay: Double)] = [(0, 0.1), (1, 0.2)]
+        XCTAssertEqual(GIFExporter.boomerangEntries(two).map(\.index), [0, 1])
+    }
 }

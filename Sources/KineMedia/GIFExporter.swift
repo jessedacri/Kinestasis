@@ -37,14 +37,23 @@ public enum GIFExporter {
         return entries
     }
 
+    /// Ping-pong: forward, then back through the interior only (the ends
+    /// are not doubled), so the loop point is seamless in both directions.
+    static func boomerangEntries(_ entries: [(index: Int, delay: Double)]) -> [(index: Int, delay: Double)] {
+        guard entries.count > 2 else { return entries }
+        return entries + entries[1..<(entries.count - 1)].reversed()
+    }
+
     public static func export(shot: BurstShot, mode: ShotTimingMode, skipDefault: Int,
-                              rate: FrameRate, maxPixel: Int, to url: URL,
+                              rate: FrameRate, maxPixel: Int, boomerang: Bool = false,
+                              to url: URL,
                               isCancelled: @Sendable () -> Bool = { false }) throws {
         let frames = shot.playbackFrames(skipDefault: skipDefault)
         let schedule = ShotTimingEngine.applyRamp(
             ShotTimingEngine.schedule(frames: frames, mode: mode, rate: rate),
             ramp: shot.speedRamp)
-        let entries = consolidatedEntries(schedule: schedule, fps: rate.fps)
+        var entries = consolidatedEntries(schedule: schedule, fps: rate.fps)
+        if boomerang { entries = boomerangEntries(entries) }
         guard !entries.isEmpty, !frames.isEmpty else { throw GIFError.emptyShot }
 
         guard let dest = CGImageDestinationCreateWithURL(
@@ -56,13 +65,20 @@ public enum GIFExporter {
         ] as CFDictionary)
 
         let renderer = ShotGradeRenderer()
+        var rendered: [Int: CGImage] = [:]   // each still develops once; boomerang reuses
         for entry in entries {
             if isCancelled() { throw CancellationError() }
             guard frames.indices.contains(entry.index) else { continue }
             let source = shot.sourceURL(for: frames[entry.index])
-            guard let image = renderer.render(url: source, grade: shot.grade,
-                                              maxPixel: maxPixel,
-                                              grainSeed: Int64(entry.index)) else {
+            let image: CGImage
+            if let cached = rendered[entry.index] {
+                image = cached
+            } else if let fresh = renderer.render(url: source, grade: shot.grade,
+                                                  maxPixel: maxPixel,
+                                                  grainSeed: Int64(entry.index)) {
+                rendered[entry.index] = fresh
+                image = fresh
+            } else {
                 throw GIFError.renderFailed(source)
             }
             CGImageDestinationAddImage(dest, image, [
