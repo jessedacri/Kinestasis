@@ -4524,6 +4524,17 @@ public final class WorkspaceModel: ObservableObject {
     }
     private var shotPlayTimer: Timer?
 
+    /// Preview the shot the way a boomerang GIF plays it: forward, then
+    /// back. Shared with GIF export, so the player is the proof of what
+    /// the file will do. Persisted across launches.
+    @Published public var boomerangPreview: Bool = UserDefaults.standard.bool(forKey: "gifExport.boomerang") {
+        didSet {
+            UserDefaults.standard.set(boomerangPreview, forKey: "gifExport.boomerang")
+            if !boomerangPreview { boomerangReversing = false }
+        }
+    }
+    private var boomerangReversing = false
+
     /// Cached schedule per shot — cards ask for this on every render, and
     /// recomputing as-shot cadence for 200+ shots per frame is what made
     /// scrolling chop. Key covers everything that changes the schedule.
@@ -4674,6 +4685,15 @@ public final class WorkspaceModel: ObservableObject {
         shot.playbackFrames(skipDefault: project.settings.burst.frameSkip)
     }
 
+    /// Length of one loop in timeline frames. Boomerang adds the return
+    /// pass, which skips the first and last still.
+    public func loopFrames(schedule: [StillEvent]) -> Int64 {
+        guard boomerangPreview, let loop = BoomerangLoop(schedule: schedule) else {
+            return ShotTimingEngine.totalFrames(schedule)
+        }
+        return loop.totalFrames
+    }
+
     public func toggleShotPlayback() {
         shotPlayRate == 0 ? shotPlay(rate: 1) : shotStop()
     }
@@ -4702,6 +4722,7 @@ public final class WorkspaceModel: ObservableObject {
 
     public func shotStop() {
         shotPlayRate = 0
+        boomerangReversing = false
         shotPlayTimer?.invalidate()
         shotPlayTimer = nil
         pumpPreviewDecodes()   // priming resumes now that playback yields
@@ -4754,18 +4775,36 @@ public final class WorkspaceModel: ObservableObject {
         let schedule = scheduleForPreviewShot()
         let total = ShotTimingEngine.totalFrames(schedule)
         guard total > 0, shotPlayRate != 0 else { return }
-        var next = shotPlayheadFrame + Int64(shotPlayRate.rounded())
-        // Loop — burst preview wants to cycle, not stop at the end.
-        if next >= total { next = 0 }
-        if next < 0 { next = total - 1 }
+        let step = Int64(shotPlayRate.rounded())
+        var next = shotPlayheadFrame + (boomerangReversing ? -step : step)
+        // Ping-pong exactly the way GIFExporter.boomerangEntries does: the
+        // return pass skips the first and last still, so neither end is
+        // doubled and the loop is seamless in both directions. Two stills
+        // or fewer have no interior, and the exporter leaves them alone.
+        if boomerangPreview, let loop = BoomerangLoop(schedule: schedule) {
+            if next >= total {
+                next = max(0, loop.lastStillStart - 1)
+                boomerangReversing = true
+            } else if boomerangReversing, next < loop.firstStillEnd {
+                next = 0
+                boomerangReversing = false
+            }
+        } else {
+            // Loop — burst preview wants to cycle, not stop at the end.
+            boomerangReversing = false
+            if next >= total { next = 0 }
+            if next < 0 { next = total - 1 }
+        }
         shotPlayheadFrame = next
         // Lookahead: queue the stills about to hit the screen, so cold
         // first loops decode exactly what playback needs next instead of
         // whatever priming had in hand.
         if let shot = previewShot {
             let frames = playbackFrames(for: shot)
-            for ahead in stride(from: next + 4, through: next + 24, by: 4) {
-                let f = ahead >= total ? ahead - total : ahead
+            let direction: Int64 = boomerangReversing ? -1 : 1
+            for offset in stride(from: Int64(4), through: Int64(24), by: 4) {
+                let ahead = next + offset * direction
+                let f = ahead >= total ? ahead - total : (ahead < 0 ? ahead + total : ahead)
                 if let event = ShotTimingEngine.event(at: f, in: schedule),
                    frames.indices.contains(event.frameIndex) {
                     requestPreviewFrame(shot.sourceURL(for: frames[event.frameIndex]))

@@ -34,9 +34,10 @@ struct ShotPlayerView: View {
         let total = max(1, ShotTimingEngine.totalFrames(workspace.scheduleForPreviewShot()))
         return HStack(spacing: 8) {
             playPauseButton
+            boomerangButton
             TransportFrameCounter(transport: workspace.shotTransport, total: total)
             TransportScrub(workspace: workspace, transport: workspace.shotTransport, total: total)
-            durationLabel(total: total)
+            durationLabel
             Divider().frame(height: 12)
             trimButtons(shot)
             TransportMarkControls(workspace: workspace, transport: workspace.shotTransport)
@@ -56,8 +57,20 @@ struct ShotPlayerView: View {
         .buttonStyle(.plain)
     }
 
-    private func durationLabel(total: Int64) -> some View {
-        Text(String(format: "%.1fs", Double(total) / workspace.shotFrameRate.fps))
+    private var boomerangButton: some View {
+        Button {
+            workspace.boomerangPreview.toggle()
+        } label: {
+            Image(systemName: "arrow.left.arrow.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(workspace.boomerangPreview ? KineTheme.accent : KineTheme.textMuted)
+        }
+        .buttonStyle(.plain)
+        .help("Boomerang: play forward, then back, the way the GIF will loop")
+    }
+
+    private var durationLabel: some View {
+        Text(String(format: "%.1fs", Double(workspace.loopFrames(schedule: workspace.scheduleForPreviewShot())) / workspace.shotFrameRate.fps))
             .font(KineTheme.monoSmall)
             .foregroundStyle(KineTheme.textMuted)
     }

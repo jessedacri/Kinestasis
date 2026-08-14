@@ -11,7 +11,6 @@ struct GIFExportSheet: View {
     let request: WorkspaceModel.GIFExportRequest
 
     @State private var maxPixel = 640
-    @State private var boomerang = false
     @State private var exporting = false
 
     private var shot: BurstShot? { workspace.project.mediaPool.shots[request.shotID] }
@@ -35,7 +34,7 @@ struct GIFExportSheet: View {
                 Text("640 px is the size most of the internet uses: sharp enough, small enough, plays everywhere.")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
-                Toggle(isOn: $boomerang) {
+                Toggle(isOn: $workspace.boomerangPreview) {
                     Text("Boomerang (forward, then back, perfect loop)")
                         .font(.system(size: 11))
                 }
@@ -59,12 +58,11 @@ struct GIFExportSheet: View {
         .onAppear {
             let saved = UserDefaults.standard.integer(forKey: "gifExport.maxPixel")
             if saved > 0 { maxPixel = saved }
-            boomerang = UserDefaults.standard.bool(forKey: "gifExport.boomerang")
         }
     }
 
     private func summary(_ shot: BurstShot) -> String {
-        let seconds = Double(ShotTimingEngine.totalFrames(workspace.schedule(for: shot))) / workspace.shotFrameRate.fps
+        let seconds = Double(workspace.loopFrames(schedule: workspace.schedule(for: shot))) / workspace.shotFrameRate.fps
         let count = workspace.playbackFrames(for: shot).count
         return String(format: "%@ · %d stills · %.1fs loop", shot.name, count, seconds)
     }
@@ -76,13 +74,12 @@ struct GIFExportSheet: View {
         panel.allowedContentTypes = [.gif]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         UserDefaults.standard.set(maxPixel, forKey: "gifExport.maxPixel")
-        UserDefaults.standard.set(boomerang, forKey: "gifExport.boomerang")
         exporting = true
         let mode = shot.timing(projectDefault: workspace.project.settings.burst.timing)
         let skip = workspace.project.settings.burst.frameSkip
         let rate = workspace.shotFrameRate
         let pixels = maxPixel
-        let pingPong = boomerang
+        let pingPong = workspace.boomerangPreview
         Task.detached(priority: .userInitiated) {
             do {
                 try GIFExporter.export(shot: shot, mode: mode, skipDefault: skip,
