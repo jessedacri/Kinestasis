@@ -17,8 +17,7 @@ build + launch locally for Jesse, he says when to cut. 122 tests
 sends excellent logs (`kinestasis-logs-from-user/`).
 
 **Field diagnostics (new):** Kinestasis menu > Record Diagnostics, or
-`--diagnostics`, writes one plain-text file to ~/Documents/Kinestasis
-Diagnostics: stalls with the app's activity at the time, decode queue
+`--diagnostics`, writes one plain-text file to ~/Library/Logs/Kinestasis: stalls with the app's activity at the time, decode queue
 depth, RAM and disk cache hit rates, slow decodes, tier changes. Content
 is timing, counts, and basenames only, so a user can send it without
 sending their pictures. `KineDiagnostics` (KineCore) costs one Bool read
