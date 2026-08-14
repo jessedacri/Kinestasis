@@ -21,6 +21,10 @@ struct KineApp: App {
                 Button("About Kinestasis") {
                     NotificationCenter.default.post(name: .kineShowAbout, object: nil)
                 }
+                Divider()
+                Button("Record Diagnostics") {
+                    NotificationCenter.default.post(name: .kineToggleDiagnostics, object: nil)
+                }
             }
             CommandGroup(replacing: .newItem) {
                 Button("New Project") {

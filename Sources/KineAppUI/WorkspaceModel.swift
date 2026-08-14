@@ -341,21 +341,59 @@ public final class WorkspaceModel: ObservableObject {
     /// lands wherever stdout goes (the launch terminal / task log).
     private nonisolated func startLagWatchdog() {
         DispatchQueue(label: "kine.lag.watchdog", qos: .utility).async { [weak self] in
+            var ticks = 0
             while true {
                 let sent = DispatchTime.now()
+                ticks += 1
+                let snapshotTick = ticks % 4 == 0
                 DispatchQueue.main.async {
                     let ms = Double(DispatchTime.now().uptimeNanoseconds &- sent.uptimeNanoseconds) / 1e6
-                    guard ms > 250, let self else { return }
+                    guard ms > 250 || (snapshotTick && KineDiagnostics.isRecording), let self else { return }
                     MainActor.assumeIsolated {
-                        let line = String(format: "[lag] main thread stalled %.0f ms · pending %d · decoding %d · thumbs %d · cache %.0f MB\n",
-                                          ms, self.previewPending.count, self.previewActiveCount,
-                                          self.thumbActiveCount, Double(self.shotFrameBytes) / 1e6)
-                        FileHandle.standardError.write(Data(line.utf8))
+                        let stats = String(format: "pending %d · decoding %d · thumbs %d · cache %.0f MB",
+                                           self.previewPending.count, self.previewActiveCount,
+                                           self.thumbActiveCount, Double(self.shotFrameBytes) / 1e6)
+                        if ms > 250 {
+                            let line = String(format: "[lag] main thread stalled %.0f ms · %@\n", ms, stats)
+                            FileHandle.standardError.write(Data(line.utf8))
+                            KineDiagnostics.log(String(format: "STALL %.0f ms · %@ · %@",
+                                                       ms, stats, self.diagnosticsActivity))
+                        } else {
+                            KineDiagnostics.snapshot("\(stats) · \(self.diagnosticsActivity)")
+                        }
                     }
                 }
                 Thread.sleep(forTimeInterval: 0.5)
             }
         }
+    }
+
+    /// What the app is doing right now, for the diagnostics log: enough to
+    /// tell a stall during a scrub from one during import.
+    private var diagnosticsActivity: String {
+        var parts = ["tier \(previewQuality.label)"]
+        if shotPlayRate != 0 { parts.append("playing") }
+        if skimShotID != nil { parts.append("skim") }
+        if primeInFlight > 0 || !primeQueue.isEmpty { parts.append("priming \(primeQueue.count) left") }
+        if generatingPreviews { parts.append("generating") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Starts a field recording. Returns the file the user should send.
+    @discardableResult
+    public func startDiagnosticsRecording() -> URL? {
+        let url = KineDiagnostics.start(context: [
+            "preview tier": previewQuality.label,
+            "shots": "\(orderedShots.count)",
+            "stills": "\(orderedShots.reduce(0) { $0 + $1.frames.count })",
+        ])
+        KineDiagnostics.log("recording started")
+        return url
+    }
+
+    @discardableResult
+    public func stopDiagnosticsRecording() -> URL? {
+        KineDiagnostics.stop()
     }
 
     /// Kick off (or no-op if already cached / in flight) waveform and
@@ -4073,6 +4111,7 @@ public final class WorkspaceModel: ObservableObject {
 
     public func setPreviewQuality(_ quality: PreviewQuality) {
         guard quality != previewQuality else { return }
+        KineDiagnostics.log("preview tier \(previewQuality.label) to \(quality.label)")
         previewQuality = quality
         UserDefaults.standard.set(quality.rawValue, forKey: "previewQuality")
         // Progressive: existing frames keep showing at the old size and
@@ -4248,9 +4287,13 @@ public final class WorkspaceModel: ObservableObject {
     /// Decode a preview frame off-main if it isn't cached; bumps
     /// `previewVersion` when it lands.
     public func requestPreviewFrame(_ url: URL) {
-        if let entry = shotFrameCache[url], entry.epoch == cacheEpoch { return }
+        if let entry = shotFrameCache[url], entry.epoch == cacheEpoch {
+            KineDiagnostics.count(.ramHit)
+            return
+        }
         guard !shotFramesInFlight.contains(url),
               !previewPendingSet.contains(url) else { return }
+        KineDiagnostics.count(.enqueue)
         previewPending.append(url)
         previewPendingSet.insert(url)
         while previewPending.count > Self.previewPendingCap {
@@ -4303,6 +4346,7 @@ public final class WorkspaceModel: ObservableObject {
                 // nothing, which is what makes repeat imports, relaunch,
                 // and re-priming instant and quiet.
                 if let cached = PreviewDiskCache.load(url: url, maxPixel: maxPixel) {
+                    KineDiagnostics.count(.diskHit)
                     await MainActor.run {
                         self.shotFramesInFlight.remove(url)
                         self.previewActiveCount -= 1
@@ -4327,6 +4371,15 @@ public final class WorkspaceModel: ObservableObject {
                     ? StillDecoder.decode(url: url, maxPixel: maxPixel)
                     : StillDecoder.preview(url: url, maxPixel: maxPixel)
                 if let image { PreviewDiskCache.store(image, url: url, maxPixel: maxPixel) }
+                KineDiagnostics.count(.decode)
+                if KineDiagnostics.isRecording {
+                    let ms = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1e6
+                    if ms > 250 {
+                        KineDiagnostics.log(String(format: "slow decode %.0f ms at %d px%@ · %@",
+                                                   ms, maxPixel, isPrime ? " (priming)" : "",
+                                                   url.lastPathComponent))
+                    }
+                }
                 if isPrime {
                     // Light pacing on first-time develops; cached folders
                     // skip this entirely.
@@ -4676,6 +4729,7 @@ public final class WorkspaceModel: ObservableObject {
         // Prefetch once per shot entered, not once per mouse move - the
         // per-event flood was a real hover hitch on big bursts.
         if targetChanged, let shot = project.mediaPool.shots[id] {
+            KineDiagnostics.log("scrub entered \(shot.name) · \(shot.frames.count) stills · \(shot.fileTypeLabel)")
             prefetchPreviewFrames(for: shot)
         }
         let total = ShotTimingEngine.totalFrames(scheduleForPreviewShot())

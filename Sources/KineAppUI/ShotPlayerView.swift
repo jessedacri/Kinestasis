@@ -398,6 +398,7 @@ final class FrameSurfaceView: NSView, NSDraggingSource, NSFilePromiseProviderDel
         if workspace.shotPlayRate == 0 { workspace.scheduleRefinedFrame() }
         workspace.requestPreviewFrame(url)
         guard let base = workspace.cachedRefinedFrame(url) ?? workspace.cachedPreviewFrame(url) else {
+            KineDiagnostics.count(.frameMiss)
             return   // ticker fires again when the decode lands
         }
         let grade = shot.grade

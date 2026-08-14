@@ -20,6 +20,7 @@ public extension Notification.Name {
     static let kineExportSequence = Notification.Name("kine.export.sequence")
     static let kineShowEffectControls = Notification.Name("kine.effects.show")
     static let kineShowAbout = Notification.Name("kine.about.show")
+    static let kineToggleDiagnostics = Notification.Name("kine.diagnostics.toggle")
 }
 
 public struct KineRootView: View {
@@ -209,6 +210,9 @@ public struct KineRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .kineShowAbout)) { _ in
             showingAbout = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .kineToggleDiagnostics)) { _ in
+            toggleDiagnosticsRecording()
+        }
         .sheet(isPresented: $showingAbout) {
             AboutView { showingAbout = false }
         }
@@ -233,8 +237,34 @@ public struct KineRootView: View {
                     }
                 }
             }
+            if CommandLine.arguments.contains("--diagnostics") {
+                workspace.startDiagnosticsRecording()
+            }
         }
         .onDisappear { removeKeyMonitor() }
+    }
+
+    /// Field recording for a report we cannot reproduce here. Starting and
+    /// stopping both say where the file is, because the user has to find
+    /// it and send it.
+    private func toggleDiagnosticsRecording() {
+        if KineDiagnostics.isRecording {
+            let url = workspace.stopDiagnosticsRecording()
+            if let url {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+                workspace.presentNotice(
+                    title: "Diagnostics saved",
+                    message: "Saved \(url.lastPathComponent) to your Documents folder, in Kinestasis Diagnostics. It is now selected in the Finder. Send that file back.")
+            }
+        } else if workspace.startDiagnosticsRecording() != nil {
+            workspace.presentNotice(
+                title: "Recording diagnostics",
+                message: "Now do the slow thing: open the burst and scrub it until it stalls. Then choose Record Diagnostics again to stop and save the file.")
+        } else {
+            workspace.presentNotice(
+                title: "Could not start recording",
+                message: "Kinestasis could not create a log file in your Documents folder.")
+        }
     }
 
     /// Toggle the Program-fills-window mode and keep the native window
