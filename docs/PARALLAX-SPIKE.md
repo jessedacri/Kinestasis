@@ -93,7 +93,52 @@ parallax*, not from better hole filling.
 
 ## Quality on real photos
 
-Measured on this machine against real archive frames. See "Measured" below.
+Measured, not guessed: Depth Anything V2 Small F16 (48 MB) run on five real
+frames from the archive, on this M3 Max.
+
+**Speed is a non-issue.** 17.7 ms per image on the Neural Engine, 15.4 ms
+on CPU+GPU, at the model's fixed 518x392 input. That is ~60 fps class, ie.
+free next to a develop or an export. Two surprises worth knowing: the GPU
+path beat the ANE by 13%, and timing is resolution-independent because the
+input size is fixed, so a 24 MP still costs the same as a small one.
+
+**The depth is better than expected on subjects, and fails in three
+predictable places.** It cut hair edges, ear tufts, the gap between arm and
+body, and a flannel tied at the waist cleanly; it resolved a thin diagonal
+stick in front of a dog as a distinct floating object, and it saw *through*
+the gaps in an aluminium truss lattice to the background between the
+braces. It correctly ignored cast shadows rather than reading them as
+geometry. Motion blur was not a problem, which matters for burst work.
+
+The three failures:
+
+1. **Water and reflections.** An entire pond collapsed to a single "far"
+   value, ordered the same as a treeline 40 m behind it.
+2. **The far field saturates.** Everything past roughly 20 m becomes one
+   flat value, so mountains and sky lock together with no separation.
+3. **Subjects are flat cardboard standees.** Clean outlines, no internal
+   relief between nose and ear. Under motion this reads as a paper diorama
+   rather than a camera move, and it is the aesthetic risk, not a bug.
+
+**Where the warp breaks, and it is not the depth.** A proof of concept
+(16 frames, gentle back and forth, exported as a GIF) puts the usable
+limit at **2% of image width** of relative near-to-far displacement in a
+single frame. That held on every photo including the truss. 5% is fine
+when a clear subject sits against a busy dark background but visibly
+fringes against a clean bright one. 10% is broken on everything.
+
+The limiting factor throughout was disocclusion fill, not depth accuracy.
+Hole area scales linearly with shift (1.4% of pixels at the safe strength,
+18% at the broken one), and stretching background across a revealed clean
+bright field is what the eye catches. A proper directional inpaint, or a
+pre-inpainted background plate, would likely buy two to three times more
+travel. That is the same conclusion Apple's private code reaches by
+shipping an occlusion analyzer.
+
+One design trap: relative depth has no scale, so a 30 cm macro and a
+kilometre landscape both normalize to 0 to 1. A fixed strength that looks
+gentle on a landscape will tear a close-up apart. Strength has to key off
+something scene-aware, disparity spread or EXIF subject distance.
 
 ## What it costs on top of KineRender
 
@@ -132,7 +177,13 @@ with the thousands of single frames that are not bursts at all. A
 one-photo GIF with a three-degree arc is the same product promise as an
 8 fps burst clip, made from an archive of ones and twos.
 
+The measurements support it. Depth is fast enough to be invisible, good
+enough on subjects, and its failures (water, far field, flat subjects) are
+the kind you design around rather than fight. Keep the move small: 2% of
+width is both safe and, at 8 to 12 fps over a held still, plenty.
+
 If it gets built, build it in this order: depth on a single still behind a
 debug flag, the warp in the compositor, then the move as a ramp-like
-generated schedule, then the quality gate. Stop after the first step if
-the depth does not hold up on ordinary frames.
+generated schedule, then the disocclusion fill, then the quality gate.
+Stop after the first step if the depth does not hold up on Jesse's own
+frames rather than these five.
