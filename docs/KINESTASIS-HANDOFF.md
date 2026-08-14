@@ -6,25 +6,54 @@ map. Kinestasis is a standalone project (registered with the WCID manager);
 Preem (`~/Preem`) is its ancestor and continues separately — do not touch it
 from here.
 
-## State (2026-08-13)
+## State (2026-08-14)
 
-Current release 0.1.3 build 68 (`build/Kinestasis 0.1.3.dmg`, notarized;
-rebuild with `NOTARIZE=1 ./scripts/build-dmg.sh` — but do NOT cut DMGs per
-revision: build + launch locally for Jesse, he says when to cut). 103 tests
-(`swift test`; 4 more run with `KINE_REAL_FOOTAGE=1` against
-`/Volumes/BLANK 2T/XPro2 Cincinnati`). The 0.1.0 launch crash is fixed and
-confirmed by the main user, who is now actively testing and feeding back.
+Current release 0.1.5 (`build/Kinestasis 0.1.5.dmg`, notarized; boomerang
+GIFs landed post-cut and ride in the next one). Rebuild with
+`NOTARIZE=1 ./scripts/build-dmg.sh` — but do NOT cut DMGs per revision:
+build + launch locally for Jesse, he says when to cut. 122 tests
+(`swift test`; 4 more with `KINE_REAL_FOOTAGE=1` against
+`/Volumes/BLANK 2T/XPro2 Cincinnati`). The main user actively tests and
+sends excellent logs (`kinestasis-logs-from-user/`).
 
-The flow: **Shots workspace** (default) — drag folders in, EXIF-gap grouping
-into shots (min-burst threshold splits Singles aside; day sections; capture
-fps measured and shown per shot), FCPX-style hover skim (player previews the
-hovered shot, selection changes only on click), per-shot inspector (player
-with space/JKL + chords, trim with visible ranges, timing, orthogonal frame
-skip, grade, LUT, texture, ramp incl. Hold on This Still, EXIF), M marks
-stills as delivery selects, batch export sheet (codec matrix + size estimate
-+ stills selections + optional fcpxml, remembers last-used, never overwrites
-silently). **Assemble mode** — the inherited Preem timeline; shots drag from
-the bin straight onto it and play/export with zero pre-render.
+**Debug rig (use it):** `Kinestasis --import <folder>` replays the
+drag-a-folder flow; add `--develop` to auto-enter Develop on the biggest
+burst and play. A watchdog prints `[lag] main thread stalled Nms + pool
+stats` to stderr. Launch with `2>/tmp/kinestasis-stderr.log` and read the
+log; `sample <pid>` + `top -stats pid,command,cpu,th` found every stall
+this session. NEVER leave a rig instance playing after a test — it eats
+Jesse's machine (he works on the same box; his YouTube-and-typing test is
+the acceptance bar for background work).
+
+The flow: **VIEW bar (Bin | Develop | Assemble)**. Bin = card grid with
+hover skim (player previews hovered shot, selection changes on click),
+capture-fps per shot, day sections, singles pruning. Develop (Cmd+F with
+native fullscreen) = one specimen at a time: big player, inspector at the
+side, skimmable strip below, prev/next via arrows, key-glyph bar. Per-shot
+inspector: player (space/JKL + chords: I+O clears trim, K+L / J+K nudge),
+trim with visible ranges, timing + orthogonal frame skip, LR-ordered grade
+(fixed highlights direction, whites/blacks, tone curve editor, S-curve
+contrast), LUT, grain, visible wobble (0.85 EV + contrast flutter), ramps
+incl. Hold on This Still (frames + ease in/out + then-skip). M marks stills
+as delivery selects. Exits: batch export sheet (codec matrix, stills
+selections with originals/RAW, fcpxml, remembers last-used, never
+overwrites silently), per-shot GIF export (cadence-true delays, boomerang
+toggle), drag the player frame out as a full-res graded JPEG (file
+promise). **Assemble** — the inherited Preem timeline; shots drag from the
+bin straight onto it and play/export with zero pre-render.
+
+**Preview pipeline (rebuilt this session; understand before touching):**
+three tiers (Draft 448 / Balanced 960 / High 2560-real-develop) in device
+pixels; a paused playhead refines to a 2560 develop. Every decode goes
+through `PreviewDiskCache` (~/Library/Caches, keyed path+size+mtime+tier,
+20GB sweep): a frame develops once per tier EVER. In RAM, an epoch-tagged
+byte-budget cache (stale frames keep serving and re-decode lazily on tier
+change; eviction pins the previewed shot). Decode pool: LIFO user requests
+at utility, priming strictly-serial-ish behind them (2 slots, released on
+ALL skip paths - a leak here froze generation once). Generation phases
+serialize: probe -> thumbnails (2-wide) -> priming; skeleton cards reveal
+in ~10-shot batches; playback pauses priming and feeds its own lookahead.
+Video clip previews (thumbs/waveforms) run STRICTLY one clip at a time.
 
 ## Architecture in one paragraph
 
@@ -82,6 +111,39 @@ and encoder as `burstSkip`.
 - **Stale test objects**: after changing a KineCore init signature,
   `touch Tests/*/*.swift` — SPM sometimes links stale test objects and fails
   with phantom missing symbols.
+- **The whole-machine-hitching postmortem (days of Jesse pain — learn it):**
+  the villain was measured, not guessed: unbounded per-video thumbnail +
+  waveform jobs exploded the SHARED VTDecoderXPCService to 2,740 threads
+  (our process 1,559) — Safari video and system input died with it. Video
+  preview jobs are strictly serial now. Also convicted along the way, each
+  real: per-frame previewTicker bumps redrew the whole grid at 7 Hz
+  (WindowServer storm — bump only when the landed frame is on-screen);
+  CALayer implicit contents-fade animations at playback rate; per-tick
+  SwiftUI @State image swaps dragging full-window AppKit layout (frame
+  pipeline now lives OUTSIDE SwiftUI: RenderPump + FrameSurfaceView);
+  autosave JSON-encoding the project on main; a new CIContext per slider
+  tick (share renderers); disk reads per view body (cache the Looks list).
+  QoS classes do NOT throttle memory bandwidth or shared XPC services —
+  serialize and pace instead. `.background` QoS starves work to uselessness
+  on Apple Silicon; don't use it for anything the user waits on.
+- **Publish-storm rule (violated three times before it stuck):** anything
+  ticking faster than ~1 Hz must live on its own ObservableObject (see
+  ShotTransport, PreviewTicker, PrimeProgress, KeyGlyphState) with the
+  smallest possible observer, or on no publisher at all (RenderPump uses
+  Combine sinks straight to a CALayer).
+- **Pool accounting:** every skip/continue path in pumpPreviewDecodes must
+  release the slot it claimed (primeInFlight leak = frozen generation) and
+  completion paths must call maybeFinishGenerating or the skeleton reveal
+  deadlocks.
+- **JPEG embedded thumbnails are 160x120.** StillDecoder.preview falls
+  through to a real scaled decode when the embedded image is far below the
+  request — without that, JPEG bursts render garbage at every tier
+  (PreviewSizeGuardTests pins it against the real archive).
+- **In-camera RAW conversions** carry the ORIGINAL capture time on a new
+  file number; BurstGrouper.isolateRedeveloped ejects them to Singles or
+  they splice into their source burst as duplicate frames.
+- **Odd-height videos** can fail VT conversion forever (err -536870206);
+  ClipPreviewCache negative-caches failures and even-aligns thumb sizes.
 - **Never fan out unbounded high-QoS work.** Unbounded `.userInitiated`
   decode tasks (160 per hovered shot) and an all-cores probe at interactive
   priority brought a full M3 Max to a crawl on the 4k-still archive. Ingest
@@ -101,22 +163,21 @@ and encoder as `burstSkip`.
   flat bullets, no taglines, no flourish. He called the ornate version
   "annoying claude speak".
 
-## Next steps (queue as of 2026-08-13)
+## Next steps (queue as of 2026-08-14)
 
-1. Main-user feedback on 0.1.3 (stills selection + hold ramps are new).
-2. Record Ramp round two: trackpad scrub recording with haptic ticks was
-   built and pulled same day ("doesnt work right"); `RampBuilder.ramp(
-   fromDwells:)` and its tests remain as the foundation. Get the scroll
-   feel + direction right before reintroducing.
-3. Stills pipeline extensions Jesse floated: RAW delivery with development
-   settings applied but still editable (XMP sidecar).
-4. Work-order leftovers: fcpxml import into Resolve (note Premiere too);
+1. Main-user feedback on 0.1.5 (GIFs, drag-out, and the quiet import are
+   the headline answers to their reports).
+2. Cut 0.1.6 when Jesse says: boomerang GIFs are post-0.1.5.
+3. Record Ramp round two: built and pulled ("doesnt work right");
+   RampBuilder.ramp(fromDwells:) + tests remain. Get scroll feel +
+   direction right before reintroducing.
+4. Drag-out from filmstrip cards / marked stills (player-frame drag
+   shipped; same file-promise machinery extends naturally).
+5. Stills RAW delivery with editable develop settings (XMP sidecar).
+6. Work-order leftovers: fcpxml import into Resolve (note Premiere too);
    30-second screen capture of a real run.
-5. Eyeball WB slider mapping + grain defaults on real photos.
-6. Perf headroom if wanted: render the CI chain straight into writer pixel
-   buffers (skip CGImage readback); disk-backed preview cache for instant
-   cold skim on RAF.
-7. Product: demand test (X-Pro2 demo video + landing page), then listing on
+7. Eyeball WB slider mapping + grain defaults on real photos.
+8. Product: demand test (X-Pro2 demo video + landing page), then listing on
    the Lemon Squeezy rails (~/WCID/BASELINE.md).
 
 ## File map (Kinestasis-specific)
@@ -129,11 +190,18 @@ and encoder as `burstSkip`.
 - `Sources/KineMedia/ShotGradeRenderer.swift` — CI develop, grain, LUT, `gradePreview`
 - `Sources/KineMedia/BurstShotExporter.swift` — parallel export, codec matrix
 - `Sources/KineMedia/StillExporter.swift` — marked-stills delivery (JPEG/originals/RAW)
+- `Sources/KineMedia/PreviewDiskCache.swift` — decode-once-ever disk cache
+- `Sources/KineMedia/GIFExporter.swift` — cadence-true GIFs + boomerang
+- `Sources/KineMedia/ClipPreviewCache.swift` — video thumbs/waveforms, STRICTLY serial
 - `Sources/KineMedia/ShotFrameSource.swift` — stills as a timeline frame source
 - `Sources/KineMedia/ShotBatchXMLSidecar.swift` / `ExifReader.swift`
 - `Sources/KineAppUI/ShotsWorkspaceView.swift` — home screen, grid, bar controls
   (Rate / Timing / Skip / Split gap / Min burst)
-- `Sources/KineAppUI/ShotGradePanel.swift` — inspector/player, hold-ramp controls
+- `Sources/KineAppUI/ShotPlayerView.swift` — player + RenderPump + FrameSurfaceView
+  (Combine-to-CALayer frame pipeline, drag-out file promise, transport leaves)
+- `Sources/KineAppUI/ShotDevelopView.swift` — Develop View + key glyph bar
+- `Sources/KineAppUI/GIFExportSheet.swift` — GIF sheet (size, boomerang)
+- `Sources/KineAppUI/ShotGradePanel.swift` — inspector sections, hold-ramp controls
 - `Sources/KineAppUI/ShotExportSheet.swift` — export dialog, stills toggles,
   overwrite question, last-used persistence
 - `Sources/KineAppUI/WorkspaceModel.swift` — shots section: ingest, transport +
