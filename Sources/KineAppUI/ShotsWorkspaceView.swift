@@ -38,6 +38,9 @@ struct ShotsWorkspaceView: View {
         .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
             handleDrop(providers: providers)
         }
+        .sheet(item: $workspace.gifExportRequest) { request in
+            GIFExportSheet(workspace: workspace, request: request)
+        }
     }
 
     // MARK: - Project bar (global settings, the "step by step" spine)
@@ -520,6 +523,7 @@ struct ShotCard: View {
                 }
             }
             Button("Export Shot…") { workspace.beginShotExport([shot.id]) }
+            Button("Export GIF…") { workspace.beginGIFExport(shot.id) }
             Divider()
             Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
         }
@@ -528,10 +532,11 @@ struct ShotCard: View {
     /// While skimming (or when selected + playing), show the live frame
     /// full-bleed; otherwise the filmstrip.
     @ViewBuilder private var stripOrSkimFrame: some View {
-        if workspace.generatingPreviews {
-            // Static skeleton while previews build: no images, no
-            // spinners (spinners animate = compositing) - the machine
-            // belongs to the generation pass and the user's other apps.
+        if workspace.generatingPreviews, workspace.shotThumbnails[shot.id] == nil {
+            // Static skeleton until this shot's own thumbnails exist.
+            // Cards reveal in coalesced batches as generation walks the
+            // folder - content appears early without the per-frame
+            // redraw storm that used to hitch the whole machine.
             ZStack {
                 Rectangle().fill(Color.white.opacity(0.045))
                 Image(systemName: "photo.stack")

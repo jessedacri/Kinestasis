@@ -1,0 +1,77 @@
+import Foundation
+import ImageIO
+import UniformTypeIdentifiers
+import KineCore
+
+/// Animated GIF export: the universal internet recipe - GIF89a, 256-color
+/// palette with ImageIO's dithering, per-frame delays derived from the
+/// shot's real cadence (one GIF frame per still, not per timeline frame),
+/// infinite loop. Small files, plays everywhere.
+public enum GIFExporter {
+
+    public enum GIFError: LocalizedError {
+        case emptyShot
+        case renderFailed(URL)
+        case writeFailed(URL)
+        public var errorDescription: String? {
+            switch self {
+            case .emptyShot: return "nothing to export"
+            case .renderFailed(let url): return "could not develop \(url.lastPathComponent)"
+            case .writeFailed(let url): return "could not write \(url.lastPathComponent)"
+            }
+        }
+    }
+
+    /// One GIF frame per still with its total display time; consecutive
+    /// schedule events for the same still merge (ramps produce runs).
+    static func consolidatedEntries(schedule: [StillEvent], fps: Double) -> [(index: Int, delay: Double)] {
+        var entries: [(index: Int, delay: Double)] = []
+        for event in schedule {
+            let delay = Double(event.frameCount) / fps
+            if let last = entries.last, last.index == event.frameIndex {
+                entries[entries.count - 1].delay += delay
+            } else {
+                entries.append((event.frameIndex, delay))
+            }
+        }
+        return entries
+    }
+
+    public static func export(shot: BurstShot, mode: ShotTimingMode, skipDefault: Int,
+                              rate: FrameRate, maxPixel: Int, to url: URL,
+                              isCancelled: @Sendable () -> Bool = { false }) throws {
+        let frames = shot.playbackFrames(skipDefault: skipDefault)
+        let schedule = ShotTimingEngine.applyRamp(
+            ShotTimingEngine.schedule(frames: frames, mode: mode, rate: rate),
+            ramp: shot.speedRamp)
+        let entries = consolidatedEntries(schedule: schedule, fps: rate.fps)
+        guard !entries.isEmpty, !frames.isEmpty else { throw GIFError.emptyShot }
+
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.gif.identifier as CFString, entries.count, nil) else {
+            throw GIFError.writeFailed(url)
+        }
+        CGImageDestinationSetProperties(dest, [
+            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0],
+        ] as CFDictionary)
+
+        let renderer = ShotGradeRenderer()
+        for entry in entries {
+            if isCancelled() { throw CancellationError() }
+            guard frames.indices.contains(entry.index) else { continue }
+            let source = shot.sourceURL(for: frames[entry.index])
+            guard let image = renderer.render(url: source, grade: shot.grade,
+                                              maxPixel: maxPixel,
+                                              grainSeed: Int64(entry.index)) else {
+                throw GIFError.renderFailed(source)
+            }
+            CGImageDestinationAddImage(dest, image, [
+                kCGImagePropertyGIFDictionary: [
+                    kCGImagePropertyGIFDelayTime: entry.delay,
+                    kCGImagePropertyGIFUnclampedDelayTime: entry.delay,
+                ],
+            ] as CFDictionary)
+        }
+        guard CGImageDestinationFinalize(dest) else { throw GIFError.writeFailed(url) }
+    }
+}

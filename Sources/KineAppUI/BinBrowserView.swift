@@ -325,6 +325,7 @@ private struct BurstShotRow: View {
                 }
             }
             Button("Export Shot…") { workspace.beginShotExport([shot.id]) }
+            Button("Export GIF…") { workspace.beginGIFExport(shot.id) }
             Divider()
             Button("Remove Shot", role: .destructive) { workspace.removeShot(shot.id) }
         }

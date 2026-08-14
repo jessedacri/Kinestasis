@@ -4736,6 +4736,7 @@ public final class WorkspaceModel: ObservableObject {
     /// filmstrips arriving without soaking every core.
     private var thumbPending: [BurstShot] = []
     private var thumbActiveCount = 0
+    private var thumbsSinceReveal = 0
     private static let thumbMaxConcurrent = 2
 
     public func scheduleShotThumbnails(for shot: BurstShot) {
@@ -4768,7 +4769,16 @@ public final class WorkspaceModel: ObservableObject {
                     self.shotThumbnails[shotID] = images
                     self.shotThumbsInFlight.remove(shotID)
                     self.thumbActiveCount -= 1
-                    if !self.generatingPreviews { self.bumpPreviewsCoalesced() }
+                    if !self.generatingPreviews {
+                        self.bumpPreviewsCoalesced()
+                    } else {
+                        // Reveal finished cards in batches of ~10 shots.
+                        self.thumbsSinceReveal += 1
+                        if self.thumbsSinceReveal >= 10 {
+                            self.thumbsSinceReveal = 0
+                            self.bumpPreviewsCoalesced()
+                        }
+                    }
                     self.pumpThumbnailQueue()
                     // Thumbnail phase draining is what unblocks priming.
                     if self.thumbPending.isEmpty, self.thumbActiveCount == 0 {
@@ -4896,6 +4906,18 @@ public final class WorkspaceModel: ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: - GIF export
+
+    public struct GIFExportRequest: Identifiable {
+        public let id = UUID()
+        public let shotID: ShotID
+    }
+    @Published public var gifExportRequest: GIFExportRequest?
+
+    public func beginGIFExport(_ id: ShotID) {
+        gifExportRequest = GIFExportRequest(shotID: id)
     }
 
     // MARK: - On-brand notices (no system alerts)
