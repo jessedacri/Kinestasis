@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import UniformTypeIdentifiers
 import AppKit
 import KineCore
 import KineMedia
@@ -213,15 +214,46 @@ private struct PlayerFrameSurface: NSViewRepresentable {
     func makeNSView(context: Context) -> FrameSurfaceView {
         let view = FrameSurfaceView()
         context.coordinator.attach(view)
+        view.onTap = { [weak workspace] in workspace?.toggleShotPlayback() }
+        view.dragPayload = { [weak workspace] in
+            guard let workspace, let current = workspace.currentShotFrame() else { return nil }
+            let url = current.shot.sourceURL(for: current.frame)
+            let stem = url.deletingPathExtension().lastPathComponent
+            return FrameDragPayload(sourceURL: url, grade: current.shot.grade,
+                                    suggestedName: "\(current.shot.name)_\(stem).jpg")
+        }
         return view
     }
 
     func updateNSView(_ view: FrameSurfaceView, context: Context) {}
 }
 
+/// Snapshot taken at drag start, so the promised file matches the frame
+/// the user grabbed even if playback moves on.
+struct FrameDragPayload {
+    let sourceURL: URL
+    let grade: ShotGrade
+    let suggestedName: String
+}
+
 /// Layer-backed frame display: image swaps only touch CALayer.contents,
-/// never layout, and never animate implicitly.
-final class FrameSurfaceView: NSView {
+/// never layout, and never animate implicitly. Also a drag source: drag
+/// the frame out and the receiver (Finder, Messages, Mail, an app icon)
+/// gets a FULL-RESOLUTION graded JPEG via a file promise, rendered
+/// through the same develop path as stills export.
+final class FrameSurfaceView: NSView, NSDraggingSource, NSFilePromiseProviderDelegate {
+    var onTap: (() -> Void)?
+    var dragPayload: (() -> FrameDragPayload?)?
+
+    private var mouseDownPoint: NSPoint?
+    private var promisedPayload: FrameDragPayload?
+    private static let promiseQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1
+        q.qualityOfService = .userInitiated
+        return q
+    }()
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
@@ -243,6 +275,77 @@ final class FrameSurfaceView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         layer?.contentsScale = window?.backingScaleFactor ?? 2
+    }
+
+    // MARK: - Click to play, drag to export
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = event.locationInWindow
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if mouseDownPoint != nil { onTap?() }
+        mouseDownPoint = nil
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = mouseDownPoint else { return }
+        let distance = hypot(event.locationInWindow.x - start.x,
+                             event.locationInWindow.y - start.y)
+        guard distance > 5, let payload = dragPayload?() else { return }
+        mouseDownPoint = nil
+        promisedPayload = payload
+
+        let provider = NSFilePromiseProvider(fileType: UTType.jpeg.identifier, delegate: self)
+        let item = NSDraggingItem(pasteboardWriter: provider)
+        let thumb = dragThumbnail()
+        let size = NSSize(width: 160, height: 160 * (thumb.map { CGFloat($0.height) / CGFloat(max(1, $0.width)) } ?? 0.66))
+        let origin = convert(event.locationInWindow, from: nil)
+        let frame = NSRect(x: origin.x - size.width / 2, y: origin.y - size.height / 2,
+                           width: size.width, height: size.height)
+        let image = thumb.map { NSImage(cgImage: $0, size: size) } ?? NSImage(size: size)
+        item.setDraggingFrame(frame, contents: image)
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    private func dragThumbnail() -> CGImage? {
+        guard let contents = layer?.contents, CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else { return nil }
+        return (contents as! CGImage)
+    }
+
+    func draggingSession(_ session: NSDraggingSession,
+                         sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .copy
+    }
+
+    func filePromiseProvider(_ provider: NSFilePromiseProvider, fileNameForType fileType: String) -> String {
+        promisedPayload?.suggestedName ?? "Kinestasis Frame.jpg"
+    }
+
+    func operationQueue(for provider: NSFilePromiseProvider) -> OperationQueue {
+        Self.promiseQueue
+    }
+
+    func filePromiseProvider(_ provider: NSFilePromiseProvider,
+                             writePromiseTo url: URL,
+                             completionHandler: @escaping (Error?) -> Void) {
+        guard let payload = promisedPayload else {
+            completionHandler(CocoaError(.fileWriteUnknown))
+            return
+        }
+        // Full-resolution graded develop - identical to stills export.
+        guard let image = ShotGradeRenderer().render(url: payload.sourceURL,
+                                                     grade: payload.grade,
+                                                     maxPixel: 100_000) else {
+            completionHandler(CocoaError(.fileWriteUnknown))
+            return
+        }
+        do {
+            try StillExporter.writeJPEG(image, to: url)
+            completionHandler(nil)
+        } catch {
+            completionHandler(error)
+        }
     }
 }
 

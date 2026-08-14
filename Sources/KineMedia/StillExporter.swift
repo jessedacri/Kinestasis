@@ -64,7 +64,7 @@ public enum StillExporter {
         return written
     }
 
-    private static func writeJPEG(_ image: CGImage, to url: URL, quality: Double = 0.93) throws {
+    public static func writeJPEG(_ image: CGImage, to url: URL, quality: Double = 0.93) throws {
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             throw StillError.writeFailed(url)
         }
