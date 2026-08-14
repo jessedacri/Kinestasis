@@ -4132,6 +4132,7 @@ public final class WorkspaceModel: ObservableObject {
     /// would just evict itself.
     private var primeQueue: [URL] = []
     private var primeTotal = 0
+    private var primeInFlight = 0
 
     /// Prime progress on its own publisher: on the workspace it re-ran
     /// the whole app's layout at 3 Hz for the entire priming pass.
@@ -4237,9 +4238,13 @@ public final class WorkspaceModel: ObservableObject {
         // Priming yields completely while the transport runs: background
         // develops during playback were what stalled the whole machine on
         // first loops. It resumes the moment playback stops.
-        let primeAllowed = shotPlayRate == 0
+        // Priming yields to playback, waits for the thumbnail phase to
+        // finish (three overlapping pipelines was the rough first minute),
+        // and runs strictly one decode at a time.
+        let primeAllowed = shotPlayRate == 0 && thumbPending.isEmpty && thumbActiveCount == 0
+            && primeInFlight == 0
         while previewActiveCount < previewMaxConcurrent,
-              !previewPending.isEmpty || (primeAllowed && !primeQueue.isEmpty) {
+              !previewPending.isEmpty || (primeAllowed && !primeQueue.isEmpty && primeInFlight == 0) {
             let url: URL
             let isPrime: Bool
             if !previewPending.isEmpty {
@@ -4250,17 +4255,20 @@ public final class WorkspaceModel: ObservableObject {
                 url = primeQueue.removeLast()
                 updatePrimeProgress()
                 isPrime = true
+                primeInFlight += 1
             }
             if let entry = shotFrameCache[url], entry.epoch == epoch { continue }
             guard !shotFramesInFlight.contains(url) else { continue }
             shotFramesInFlight.insert(url)
             previewActiveCount += 1
             let hasAnyFrame = shotFrameCache[url] != nil
-            // Priming runs at .background - the one QoS class macOS
-            // actively starves in favor of whatever the user is doing in
-            // other apps. Direct requests (skim, playback lookahead) get
-            // .utility so the app itself stays responsive.
+            // Priming runs at .background (macOS starves it for
+            // foreground work) AND at a 50% duty cycle - QoS cannot
+            // throttle memory bandwidth, so after each decode the prime
+            // slot sleeps as long as the decode took. Premiere-style
+            // politeness: the machine belongs to the user.
             Task.detached(priority: isPrime ? .background : .utility) {
+                let started = DispatchTime.now()
                 // High tier on a cold frame: put the instant embedded
                 // preview on screen first, then let the real develop
                 // replace it - scrubbing never shows a hole while a
@@ -4274,9 +4282,14 @@ public final class WorkspaceModel: ObservableObject {
                 let image = fullDecode
                     ? StillDecoder.decode(url: url, maxPixel: maxPixel)
                     : StillDecoder.preview(url: url, maxPixel: maxPixel)
+                if isPrime {
+                    let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
+                    try? await Task.sleep(nanoseconds: min(elapsed, 1_500_000_000))
+                }
                 await MainActor.run {
                     self.shotFramesInFlight.remove(url)
                     self.previewActiveCount -= 1
+                    if isPrime { self.primeInFlight -= 1 }
                     if let image { self.storePreviewFrame(url: url, image: image) }
                     self.pumpPreviewDecodes()
                 }
@@ -4699,6 +4712,10 @@ public final class WorkspaceModel: ObservableObject {
                     self.thumbActiveCount -= 1
                     self.bumpPreviewsCoalesced()
                     self.pumpThumbnailQueue()
+                    // Thumbnail phase draining is what unblocks priming.
+                    if self.thumbPending.isEmpty, self.thumbActiveCount == 0 {
+                        self.pumpPreviewDecodes()
+                    }
                 }
             }
         }
