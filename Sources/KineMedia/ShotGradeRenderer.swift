@@ -224,7 +224,24 @@ public final class ShotGradeRenderer: @unchecked Sendable {
         let longest = max(image.extent.width, image.extent.height)
         guard longest > CGFloat(maxPixel), longest > 0 else { return image }
         let scale = CGFloat(maxPixel) / longest
-        return image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let transform = CGAffineTransform(scaleX: scale, y: scale)
+        let scaled = image.transformed(by: transform)
+        // Only aspects that divide evenly land on whole pixels: 6000x4000 →
+        // 960x640, but 4240x2832 → 960x641.207. Core Image rounds that
+        // extent outward, so the top row ends up one the image covers only
+        // a fifth of, and the GIF encoder renders it as a line of static.
+        // Crop to the pixels the image actually fills.
+        return scaled.cropped(to: image.extent.applying(transform).containedIntegral)
+    }
+}
+
+extension CGRect {
+    /// The largest integral rect this one fully contains.
+    var containedIntegral: CGRect {
+        let minX = self.minX.rounded(.up), minY = self.minY.rounded(.up)
+        let maxX = self.maxX.rounded(.down), maxY = self.maxY.rounded(.down)
+        guard maxX > minX, maxY > minY else { return self }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 }
 
