@@ -4156,8 +4156,11 @@ public final class WorkspaceModel: ObservableObject {
     @Published public private(set) var generatingPreviews = false
 
     private func maybeFinishGenerating() {
+        // Generation work only: user-facing decodes (skims, lookahead)
+        // must not hold the reveal hostage - requiring the whole pool
+        // idle left the grid stuck on skeletons forever.
         guard generatingPreviews,
-              primeQueue.isEmpty, primeInFlight == 0, previewActiveCount == 0,
+              primeQueue.isEmpty, primeInFlight == 0,
               thumbPending.isEmpty, thumbActiveCount == 0 else { return }
         generatingPreviews = false
         previewVersion += 1
@@ -4298,6 +4301,7 @@ public final class WorkspaceModel: ObservableObject {
                         if isPrime { self.primeInFlight -= 1 }
                         self.storePreviewFrame(url: url, image: cached)
                         self.pumpPreviewDecodes()
+                        self.maybeFinishGenerating()
                     }
                     return
                 }
@@ -4327,6 +4331,7 @@ public final class WorkspaceModel: ObservableObject {
                     if isPrime { self.primeInFlight -= 1 }
                     if let image { self.storePreviewFrame(url: url, image: image) }
                     self.pumpPreviewDecodes()
+                    self.maybeFinishGenerating()
                 }
             }
         }
