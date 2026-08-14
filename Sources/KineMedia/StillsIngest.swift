@@ -191,10 +191,12 @@ public struct StillsIngest: Sendable {
         var shots: [BurstShot] = []
         var singles: [StillFrame] = []
         for group in groups {
-            if group.count >= floor {
-                shots.append(BurstShot(name: String(format: "%@_S%03d", base, shots.count + 1), frames: group))
+            let (kept, redeveloped) = BurstGrouper.isolateRedeveloped(group)
+            singles.append(contentsOf: redeveloped)
+            if kept.count >= floor {
+                shots.append(BurstShot(name: String(format: "%@_S%03d", base, shots.count + 1), frames: kept))
             } else {
-                singles.append(contentsOf: group)
+                singles.append(contentsOf: kept)
             }
         }
         return IngestResult(shots: shots, singles: singles, videos: scanResult.videos)

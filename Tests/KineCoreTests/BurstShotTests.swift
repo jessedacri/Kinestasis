@@ -326,4 +326,36 @@ final class BurstShotTests: XCTestCase {
         // Identical timestamps that were never spread: no usable interval.
         XCTAssertNil(BurstShot(name: "S", frames: [frame(1), frame(1), frame(1)]).approxCaptureFPS)
     }
+
+    // MARK: - In-camera re-develop ejection
+
+    private func raf(_ n: Int, _ t: Double) -> StillFrame {
+        StillFrame(url: URL(fileURLWithPath: "/c/DSCF\(n).RAF"), captureTime: t)
+    }
+
+    func testInCameraRedevelopsAreEjectedFromBursts() {
+        // RAF burst 7043...7046 with a JPG numbered 40 shutters later but
+        // carrying a copied capture time (the X-Pro2 in-camera develop).
+        var frames = (0..<4).map { raf(7043 + $0, Double($0) * 0.25) }
+        frames.insert(StillFrame(url: URL(fileURLWithPath: "/c/DSCF7084.JPG"), captureTime: 0.6), at: 3)
+        let (kept, ejected) = BurstGrouper.isolateRedeveloped(frames.sorted { $0.captureTime < $1.captureTime })
+        XCTAssertEqual(ejected.map { $0.url.lastPathComponent }, ["DSCF7084.JPG"])
+        XCTAssertEqual(kept.count, 4)
+    }
+
+    func testAdjacentUnpairedJpegsStayInTheBurst() {
+        // Legit alternation: a JPG numbered right next to its neighbors.
+        var frames = (0..<4).map { raf(100 + $0, Double($0) * 0.25) }
+        frames.append(StillFrame(url: URL(fileURLWithPath: "/c/DSCF0104.JPG"), captureTime: 1.0))
+        let (kept, ejected) = BurstGrouper.isolateRedeveloped(frames)
+        XCTAssertTrue(ejected.isEmpty)
+        XCTAssertEqual(kept.count, 5)
+    }
+
+    func testUniformExtensionBurstsAreUntouched() {
+        let frames = (0..<10).map { raf(200 + $0, Double($0) * 0.125) }
+        let (kept, ejected) = BurstGrouper.isolateRedeveloped(frames)
+        XCTAssertTrue(ejected.isEmpty)
+        XCTAssertEqual(kept.count, 10)
+    }
 }

@@ -382,6 +382,41 @@ public enum BurstGrouper {
         return out
     }
 
+    /// In-camera RAW conversions (X-Pro2 and friends) write a NEW file
+    /// at the current shutter counter but copy the ORIGINAL capture time,
+    /// so they time-sort into the middle of their source burst as
+    /// near-duplicate frames. Detect them: wrong extension for the run
+    /// AND a file number far from both temporal neighbors.
+    public static func isolateRedeveloped(_ frames: [StillFrame]) -> (kept: [StillFrame], ejected: [StillFrame]) {
+        guard frames.count >= 3 else { return (frames, []) }
+        let exts = Dictionary(grouping: frames, by: { $0.url.pathExtension.lowercased() })
+        guard let dominant = exts.max(by: { $0.value.count < $1.value.count })?.key,
+              exts.count > 1 else { return (frames, []) }
+        let numbers = frames.map { fileNumber($0.url) }
+        var kept: [StillFrame] = []
+        var ejected: [StillFrame] = []
+        for (i, frame) in frames.enumerated() {
+            let ext = frame.url.pathExtension.lowercased()
+            var isRedevelop = false
+            if ext != dominant, let n = numbers[i] {
+                let prev = (0..<i).reversed().compactMap { numbers[$0] }.first
+                let next = ((i + 1)..<frames.count).compactMap { numbers[$0] }.first
+                let farFromPrev = prev.map { abs(n - $0) > 15 } ?? true
+                let farFromNext = next.map { abs(n - $0) > 15 } ?? true
+                isRedevelop = farFromPrev && farFromNext
+            }
+            if isRedevelop { ejected.append(frame) } else { kept.append(frame) }
+        }
+        return (kept, ejected)
+    }
+
+    /// Trailing digits of the filename stem ("DSCF7044" -> 7044).
+    public static func fileNumber(_ url: URL) -> Int? {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let digits = stem.reversed().prefix(while: \.isNumber).reversed()
+        return digits.isEmpty ? nil : Int(String(digits))
+    }
+
     /// Split stills into shots wherever the capture-time gap exceeds
     /// `gapThreshold`. Input order doesn't matter; output shots and the
     /// frames within them are sorted by capture time. Runs of identical

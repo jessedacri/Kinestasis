@@ -166,7 +166,12 @@ private struct PlayerFrameHost: View {
 
     @State private var playerImage: CGImage?
     @State private var renderGeneration = 0
-    private let renderer = ShotGradeRenderer()
+    @State private var renderInFlight = false
+    @State private var renderQueued = false
+    /// One renderer (one CIContext) for the app's player. A per-struct
+    /// renderer re-inited on every parent re-evaluation leaked a Metal
+    /// context per slider tick and ground the session down over time.
+    private static let renderer = ShotGradeRenderer()
 
     var body: some View {
         let shot = workspace.previewShot
@@ -223,13 +228,25 @@ private struct PlayerFrameHost: View {
         let ev = ExposureWobble.evOffset(
             outputFrame: seed, fps: workspace.shotFrameRate.fps,
             intensity: grade.wobbleIntensity, rate: grade.wobbleRate)
+        // One render in flight at a time: scrubbing used to pile up
+        // stale full-size CI renders until every keystroke waited in
+        // line behind them.
+        if renderInFlight {
+            renderQueued = true
+            return
+        }
+        renderInFlight = true
         renderGeneration += 1
         let generation = renderGeneration
-        let renderer = renderer
         Task.detached(priority: .userInitiated) {
-            let image = renderer.gradePreview(base, grade: grade, evOffset: ev, grainSeed: seed) ?? base
+            let image = Self.renderer.gradePreview(base, grade: grade, evOffset: ev, grainSeed: seed) ?? base
             await MainActor.run {
+                self.renderInFlight = false
                 if generation == self.renderGeneration { self.playerImage = image }
+                if self.renderQueued {
+                    self.renderQueued = false
+                    self.rerender()
+                }
             }
         }
     }
