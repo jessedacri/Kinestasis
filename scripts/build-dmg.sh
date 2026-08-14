@@ -24,7 +24,7 @@ TEAM_ID="4ND7U9JZ8C"
 SIGNING_IDENTITY="Developer ID Application: Jesse Dacri (${TEAM_ID})"
 NOTARY_PROFILE="polymerge-notary"
 
-SHORT_VERSION="0.1.5"
+SHORT_VERSION="0.1.6"
 BUILD_VERSION="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 DMG_LABEL="${DMG_LABEL:-Kinestasis ${SHORT_VERSION}}"
 
