@@ -44,6 +44,22 @@ public enum GIFExporter {
         return entries + entries[1..<(entries.count - 1)].reversed()
     }
 
+    /// GIF delays are whole centiseconds; naive rounding of 125.1ms to
+    /// 130ms ran every export ~4% slow. Quantize CUMULATIVE time instead,
+    /// so per-frame delays dither between neighboring centiseconds and
+    /// the loop duration tracks the timeline within 10ms.
+    static func quantizedDelays(_ entries: [(index: Int, delay: Double)]) -> [Double] {
+        var written = 0.0
+        var ideal = 0.0
+        return entries.map { entry in
+            ideal += entry.delay
+            let target = (ideal * 100).rounded() / 100
+            let delay = max(0.02, target - written)   // 2cs floor: browsers clamp below it
+            written += delay
+            return delay
+        }
+    }
+
     public static func export(shot: BurstShot, mode: ShotTimingMode, skipDefault: Int,
                               rate: FrameRate, maxPixel: Int, boomerang: Bool = false,
                               to url: URL,
@@ -65,8 +81,9 @@ public enum GIFExporter {
         ] as CFDictionary)
 
         let renderer = ShotGradeRenderer()
+        let delays = quantizedDelays(entries)
         var rendered: [Int: CGImage] = [:]   // each still develops once; boomerang reuses
-        for entry in entries {
+        for (position, entry) in entries.enumerated() {
             if isCancelled() { throw CancellationError() }
             guard frames.indices.contains(entry.index) else { continue }
             let source = shot.sourceURL(for: frames[entry.index])
@@ -83,8 +100,8 @@ public enum GIFExporter {
             }
             CGImageDestinationAddImage(dest, image, [
                 kCGImagePropertyGIFDictionary: [
-                    kCGImagePropertyGIFDelayTime: entry.delay,
-                    kCGImagePropertyGIFUnclampedDelayTime: entry.delay,
+                    kCGImagePropertyGIFDelayTime: delays[position],
+                    kCGImagePropertyGIFUnclampedDelayTime: delays[position],
                 ],
             ] as CFDictionary)
         }
