@@ -165,6 +165,11 @@ and encoder as `burstSkip`.
 
 ## Next steps (queue as of 2026-08-14)
 
+0. NOTE (possible revert): GIF delay dithering landed in fcab6b0 -
+   delays alternate 120/130ms so loops track the timeline instead of a
+   flat 130ms (~4% slow). Jesse was fine with the old behavior and only
+   asked out of curiosity; if the dither ever reads as judder,
+   `git revert fcab6b0` restores flat naive rounding cleanly.
 1. Main-user feedback on 0.1.5 (GIFs, drag-out, and the quiet import are
    the headline answers to their reports).
 2. Cut 0.1.6 when Jesse says: boomerang GIFs are post-0.1.5.
