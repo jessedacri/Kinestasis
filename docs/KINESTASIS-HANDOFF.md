@@ -6,19 +6,49 @@ map. Kinestasis is a standalone project (registered with the WCID manager);
 Preem (`~/Preem`) is its ancestor and continues separately — do not touch it
 from here.
 
-## State (2026-08-14)
+## State (last worked 2026-08-14)
 
-Current release 0.1.5 (`build/Kinestasis 0.1.5.dmg`, notarized; boomerang
-GIFs landed post-cut and ride in the next one). Rebuild with
-`NOTARIZE=1 ./scripts/build-dmg.sh` — but do NOT cut DMGs per revision:
-build + launch locally for Jesse, he says when to cut. 122 tests
-(`swift test`; 4 more with `KINE_REAL_FOOTAGE=1` against
-`/Volumes/BLANK 2T/XPro2 Cincinnati`). The main user actively tests and
-sends excellent logs (`kinestasis-logs-from-user/`).
+**Read this first: `main` is ahead of what anyone is running.** The main
+user is on 0.1.6 (`build/Kinestasis 0.1.6.dmg`, cut 2026-08-13). Three
+things landed after that cut and have never been in a build anyone has
+touched:
+
+1. the GIF top-row static fix (their bug, see the Core Image footgun),
+2. Record Diagnostics (built *for* them, and useless until they have it),
+3. the boomerang preview in the player transport.
+
+So the first substantive question of the next session is whether Jesse
+wants 0.1.7 cut. Nothing else in the queue matters as much, because item 2
+is the only route to diagnosing their scrub pinwheel and it cannot start
+until they have the build. `scripts/build-dmg.sh` still says
+`SHORT_VERSION="0.1.6"` — bump it, and update `CHANGELOG.html`.
+
+Rebuild with `NOTARIZE=1 ./scripts/build-dmg.sh` — but do NOT cut DMGs per
+revision: build + launch locally for Jesse, he says when to cut. 129 tests
+(`swift test`; more with `KINE_REAL_FOOTAGE=1` against
+`/Volumes/BLANK 2T/XPro2 Cincinnati` — they skip when the volume is not
+mounted, so a "6 skipped" run is normal, not a failure). The main user
+actively tests and sends excellent logs (`kinestasis-logs-from-user/`).
+
+**Commit messages carry no `Co-Authored-By` trailer and never will.** Jesse
+asked twice, emphatically, and on 2026-08-14 all 110 commits on `main` were
+rewritten to strip them. Do not reintroduce one. The only surviving copies
+are in `refs/remotes/origin/*`, a vestigial remote pointing at the local
+`~/Preem` fork source; `git remote remove origin` clears them if he wants
+that, and nothing here has ever been pushed anywhere.
+
+**Loose binaries got committed by accident** on 2026-08-14 (a broad
+`git add -A`): `DSC02568.jpeg`, `DSC02568 2.jpeg` at the repo root, and the
+same scanline GIF in both `examples/` and `repro/`. About 14 MB, `.git` is
+68 MB. Untracking them is one command; purging the blobs is another history
+rewrite. Jesse's call, not a silent cleanup.
 
 **Field diagnostics (new):** Kinestasis menu > Record Diagnostics, or
-`--diagnostics`, writes one plain-text file to ~/Library/Logs/Kinestasis: stalls with the app's activity at the time, decode queue
-depth, RAM and disk cache hit rates, slow decodes, tier changes. Content
+`--diagnostics`, writes one plain-text file to
+`~/Library/Logs/Kinestasis` (not Documents - macOS gates that behind a
+consent prompt a remote user might dismiss): stalls with the app's
+activity at the time, decode queue depth, RAM and disk cache hit rates,
+slow decodes, tier changes. Content
 is timing, counts, and basenames only, so a user can send it without
 sending their pictures. `KineDiagnostics` (KineCore) costs one Bool read
 when off; messages are autoclosures, counters aggregate between snapshots.
@@ -191,31 +221,60 @@ and encoder as `burstSkip`.
 
 ## Next steps (queue as of 2026-08-14)
 
-0. NOTE (possible revert): GIF delay dithering landed in fcab6b0 -
-   delays alternate 120/130ms so loops track the timeline instead of a
-   flat 130ms (~4% slow). Jesse was fine with the old behavior and only
-   asked out of curiosity; if the dither ever reads as judder,
-   `git revert fcab6b0` restores flat naive rounding cleanly.
-1. Main-user feedback on 0.1.5 (GIFs, drag-out, and the quiet import are
-   the headline answers to their reports).
-2. Cut 0.1.6 when Jesse says: boomerang GIFs are post-0.1.5.
-3. Record Ramp round two: built and pulled ("doesnt work right");
+1. **Cut 0.1.7 when Jesse says.** Carries the scanline fix, Record
+   Diagnostics, and the boomerang preview. Everything below item 2 is
+   blocked behind it in practice.
+2. **Then relay the diagnostics instruction to the main user**, verbatim:
+   "In the Kinestasis menu choose Record Diagnostics, scrub the burst that
+   pinwheels until it stalls, then choose Record Diagnostics again and send
+   me the file it reveals in the Finder." When the log arrives: read the
+   STALL lines and the counters around them, name the cause in `WCID.md`,
+   fix it if small, scope it in a work order if not. The open hypothesis
+   space is decode queue depth, a cache miss storm at the High tier, or
+   something outside the preview pipeline entirely — the log exists
+   precisely because guessing has not worked.
+3. One question for the main user, not blocking (the fix is
+   aspect-independent): confirm the scanline GIFs came from Sony files.
+   The 960x642 geometry says A7S III, and confirming closes the loop.
+4. **Parallax, if Jesse wants it** (`docs/PARALLAX-SPIKE.md` is the
+   decision input; Apple's spatialization is closed to us, the camera-move
+   route is open). Build order: depth on a single still behind a debug
+   flag, warp in the compositor, the move as a generated schedule, the
+   disocclusion fill, then the quality gate. Stop after step one if depth
+   fails on his own frames.
+5. Record Ramp round two: built and pulled ("doesnt work right");
    RampBuilder.ramp(fromDwells:) + tests remain. Get scroll feel +
    direction right before reintroducing.
-4. Drag-out from filmstrip cards / marked stills (player-frame drag
+6. Remaining GIF-first candidates Jesse did NOT pick on 2026-08-14, kept
+   because they may come back: GIF button on the shot card and player,
+   drag a GIF out the way stills drag out, per-shot GIF settings that
+   persist. He chose only the loop preview; do not build these unasked.
+7. Drag-out from filmstrip cards / marked stills (player-frame drag
    shipped; same file-promise machinery extends naturally).
-5. Stills RAW delivery with editable develop settings (XMP sidecar).
-6. Work-order leftovers: fcpxml import into Resolve (note Premiere too);
-   30-second screen capture of a real run.
-7. Eyeball WB slider mapping + grain defaults on real photos.
-8. Product: demand test (X-Pro2 demo video + landing page), then listing on
-   the Lemon Squeezy rails (~/WCID/BASELINE.md).
+8. Stills RAW delivery with editable develop settings (XMP sidecar).
+9. Long-open verification: fcpxml import into Resolve (note Premiere too);
+   30-second screen capture of a real run; eyeball WB slider mapping and
+   grain defaults on real photos.
+10. NOTE (possible revert): GIF delay dithering landed in `0101312` (was
+   fcab6b0 before the history rewrite) - delays alternate 120/130ms so
+   loops track the timeline instead of a flat 130ms (~4% slow). Jesse was
+   fine with the old behavior and only asked out of curiosity; if the
+   dither ever reads as judder, reverting that commit restores flat naive
+   rounding cleanly.
+
+Product note: the demand test, landing page, and listing are
+**owner-deferred**. Kinestasis is in a deliberate R&D phase and Jesse will
+call it. Do not raise it.
 
 ## File map (Kinestasis-specific)
 
 - `Sources/KineCore/BurstShot.swift` — model + grouping + timing engine +
   frame skip + marked stills
 - `Sources/KineCore/RampBuilder.swift` — hold/dwell ramp generation
+- `Sources/KineCore/BoomerangLoop.swift` — where a ping-pong loop turns
+  around; shared by the player transport and `GIFExporter`
+- `Sources/KineCore/KineDiagnostics.swift` — opt-in field recorder
+  (Record Diagnostics); free when off, aggregates counters when on
 - `Sources/KineCore/ResourceBundle.swift` — safe bundle lookup (launch crash)
 - `Sources/KineMedia/StillsIngest.swift` — scan, pairs, capped parallel probe
 - `Sources/KineMedia/ShotGradeRenderer.swift` — CI develop, grain, LUT, `gradePreview`
@@ -241,6 +300,11 @@ and encoder as `burstSkip`.
 - `Sources/KineAppUI/KineAppUI.swift` — key monitor incl. chord handling
 - `CHANGELOG.html` — user-facing changelog (keep flat and plain)
 - `scripts/build-dmg.sh` — sign + notarize + masked-`.build` launch smoke test
+- `docs/PARALLAX-SPIKE.md` — the single-photo parallax decision input
+  (2026-08-14): Apple's spatialization is closed to third parties, the DIY
+  camera-move route is open and measured
+- `repro/scanline_glitch_example.gif` — the main user's GIF with the top
+  line of static, kept as the artifact behind the Core Image footgun
 - Inherited engine docs (`docs/*.md` from Preem) describe the compositor/
   timeline machinery and still use Preem-era names; read for mechanism, not
   product scope.
