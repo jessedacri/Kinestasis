@@ -13,3 +13,7 @@ build/
 DSC*.jpeg
 DSC*.JPG
 examples/scanline_glitch_example.gif
+
+# Portfolio bookkeeping for the WCID manager, local only
+WCID.md
+WCID-WORKORDER*.md
