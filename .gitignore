@@ -8,3 +8,8 @@ themarket.mp4
 *.mxf
 *.MXF
 build/
+
+# Stray captures dropped at the root while testing
+DSC*.jpeg
+DSC*.JPG
+examples/scanline_glitch_example.gif
