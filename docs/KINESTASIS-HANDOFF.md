@@ -6,7 +6,7 @@ map. Kinestasis is a standalone project (registered with the WCID manager);
 Preem (`~/Preem`) is its ancestor and continues separately — do not touch it
 from here.
 
-## State (last worked 2026-08-14)
+## State (last code work 2026-08-14; published to GitHub 2026-09-22)
 
 **Read this first: `main` is ahead of what anyone is running.** The main
 user is on 0.1.6 (`build/Kinestasis 0.1.6.dmg`, cut 2026-08-13). Three
@@ -32,16 +32,23 @@ actively tests and sends excellent logs (`kinestasis-logs-from-user/`).
 
 **Commit messages carry no `Co-Authored-By` trailer and never will.** Jesse
 asked twice, emphatically, and on 2026-08-14 all 110 commits on `main` were
-rewritten to strip them. Do not reintroduce one. The only surviving copies
-are in `refs/remotes/origin/*`, a vestigial remote pointing at the local
-`~/Preem` fork source; `git remote remove origin` clears them if he wants
-that, and nothing here has ever been pushed anywhere.
+rewritten to strip them. Do not reintroduce one. The last copies lived in
+`refs/remotes/origin/*` under the vestigial remote that pointed at the local
+`~/Preem` fork source; that remote was removed on 2026-09-22 and they are
+gone. `main` was verified clean of the trailer before the first push.
 
-**Loose binaries got committed by accident** on 2026-08-14 (a broad
-`git add -A`): `DSC02568.jpeg`, `DSC02568 2.jpeg` at the repo root, and the
-same scanline GIF in both `examples/` and `repro/`. About 14 MB, `.git` is
-68 MB. Untracking them is one command; purging the blobs is another history
-rewrite. Jesse's call, not a silent cleanup.
+**The repo is public on GitHub** (2026-09-22):
+`https://github.com/jessedacri/Kinestasis`, `origin`, `main` tracking. History
+went up as-is, all 113 commits including the 29 inherited Preem-baseline ones.
+PolymergeKit stays a local-path dep, so a bare clone does not build without
+the sibling checkout; `README.md` says so. Untracked before the push, still on
+disk: the loose binaries a broad `git add -A` swept in on 2026-08-14
+(`DSC02568.jpeg` and its duplicate at the root, the scanline GIF's second copy
+in `examples/` - `repro/` keeps the one the Core Image footgun points at), and
+the WCID bookkeeping (`WCID.md`, the work orders), which is portfolio material
+and not project documentation. Their blobs are still in history; purging those
+would be a rewrite of a now-published history, so it is Jesse's call and not a
+silent cleanup. `.git` is 68 MB, most of it the 21 MB user system log.
 
 **Field diagnostics (new):** Kinestasis menu > Record Diagnostics, or
 `--diagnostics`, writes one plain-text file to
