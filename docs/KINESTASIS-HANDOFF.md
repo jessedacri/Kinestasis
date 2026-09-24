@@ -39,16 +39,22 @@ gone. `main` was verified clean of the trailer before the first push.
 
 **The repo is public on GitHub** (2026-09-22):
 `https://github.com/jessedacri/Kinestasis`, `origin`, `main` tracking. History
-went up as-is, all 113 commits including the 29 inherited Preem-baseline ones.
+was purged before publishing (see below) and stands at 103 commits, including
+the inherited Preem-baseline ones.
 PolymergeKit stays a local-path dep, so a bare clone does not build without
-the sibling checkout; `README.md` says so. Untracked before the push, still on
-disk: the loose binaries a broad `git add -A` swept in on 2026-08-14
+the sibling checkout; `README.md` says so. **Purged from history on 2026-09-23** with `git-filter-repo`, and gitignored
+so they cannot come back: the WCID bookkeeping (`WCID.md`, the work orders -
+pricing and eval scores do not belong in a public repo), the user logs
+(`kinestasis-logs-from-user/`, 21 MB of a tester's crash reports and machine
+details), the loose binaries a broad `git add -A` swept in on 2026-08-14
 (`DSC02568.jpeg` and its duplicate at the root, the scanline GIF's second copy
-in `examples/` - `repro/` keeps the one the Core Image footgun points at), and
-the WCID bookkeeping (`WCID.md`, the work orders), which is portfolio material
-and not project documentation. Their blobs are still in history; purging those
-would be a rewrite of a now-published history, so it is Jesse's call and not a
-silent cleanup. `.git` is 68 MB, most of it the 21 MB user system log.
+in `examples/` - `repro/` keeps the one the Core Image footgun points at). All
+of them are still on disk, just untracked. `.git` went 68 MB to 17 MB, 117
+commits to 103 (the WCID-only doc commits went empty and were pruned), and
+every SHA changed - a pre-purge bundle sits at
+`~/Kinestasis-history-backup-2026-09-23.bundle` if anything is ever needed
+back. The GitHub repo was deleted and recreated rather than force-pushed, so
+no old commit is reachable by SHA.
 
 **Field diagnostics (new):** Kinestasis menu > Record Diagnostics, or
 `--diagnostics`, writes one plain-text file to
@@ -262,8 +268,8 @@ and encoder as `burstSkip`.
 9. Long-open verification: fcpxml import into Resolve (note Premiere too);
    30-second screen capture of a real run; eyeball WB slider mapping and
    grain defaults on real photos.
-10. NOTE (possible revert): GIF delay dithering landed in `0101312` (was
-   fcab6b0 before the history rewrite) - delays alternate 120/130ms so
+10. NOTE (possible revert): GIF delay dithering landed in `364b30c` (the SHA
+   has moved twice with history rewrites; grep the subject, not the hash) - delays alternate 120/130ms so
    loops track the timeline instead of a flat 130ms (~4% slow). Jesse was
    fine with the old behavior and only asked out of curiosity; if the
    dither ever reads as judder, reverting that commit restores flat naive

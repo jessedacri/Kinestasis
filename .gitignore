@@ -17,3 +17,6 @@ examples/scanline_glitch_example.gif
 # Portfolio bookkeeping for the WCID manager, local only
 WCID.md
 WCID-WORKORDER*.md
+
+# Logs a user sent us: their machine, not ours to publish
+kinestasis-logs-from-user/
