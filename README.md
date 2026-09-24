@@ -17,7 +17,7 @@ grade and grain pipeline.
 ## Status
 
 R&D. Current build is 0.1.6; `main` carries unshipped work beyond it.
-Not open for contributions.
+Not open for contributions, Sam excepted.
 
 ## Requirements
 
@@ -80,4 +80,10 @@ this product is.
 
 ## License
 
-All rights reserved.
+All rights reserved, except for Sam Patton.
+
+Sam Patton can do anything he wants with this repo. It was his idea. See
+`LICENSE`. Everyone else, ask.
+
+Building also needs PolymergeKit, which is a separate private repository
+and is not covered by that grant.
